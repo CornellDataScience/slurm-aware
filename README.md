@@ -1,53 +1,59 @@
 # Slurm-Aware
 
-A small, single-node Slurm playground running in Docker Desktop. Use it to
+A small, two-node Slurm playground running in Docker Desktop. Use it to
 practice submitting jobs or develop software that calls Slurm.
 
 Docker packages a Linux environment into an **image** (built from `Dockerfile`).
 A **container** is a running instance of that image. Docker Compose uses
 `compose.yaml` to build and start it with the right settings.
 
-Inside this container, `slurmctld` schedules jobs, `slurmd` runs them, and MUNGE
-provides authentication. Your usual Slurm client commands are installed too.
-The controller and compute node share one container named `slurm`.
+The cluster runs as three containers. `controller` runs `slurmctld`, which
+schedules jobs. `slurm1` and `slurm2` are compute nodes that each run `slurmd`,
+which runs jobs. MUNGE provides authentication using a key shared by all three
+containers (`docker/munge.key`). Your usual Slurm client commands are installed
+in every container. The examples below run them on `controller`.
 
 ## Start it
 
 Open Docker Desktop and make sure it is using Linux containers. Run these
-commands in PowerShell from this repository:
+commands in PowerShell from this repository. The first command creates the
+shared MUNGE key and is only needed once. The key is ignored by git, so each
+person makes their own:
 
 ```powershell
+docker run --rm -v "${PWD}/docker:/out" ubuntu:22.04 dd if=/dev/urandom of=/out/munge.key bs=1024 count=1
 docker compose up --build -d --wait
-docker compose exec --user student slurm sinfo
+docker compose exec --user student controller sinfo
 ```
 
 The first build downloads Ubuntu and installs Slurm, so allow a few minutes.
-`-d` keeps the container running in the background; `--wait` waits until Slurm
-is ready. You should see a `debug` partition with one `idle` node.
+`-d` keeps the containers running in the background; `--wait` waits until Slurm
+is ready. You should see a `debug` partition with two `idle` nodes, `slurm1` and `slurm2`.
 
 ## Submit your first job
 
 ```powershell
-docker compose exec --user student slurm sbatch hello.sbatch
-docker compose exec --user student slurm squeue
+docker compose exec --user student controller sbatch hello.sbatch
+docker compose exec --user student controller squeue
 ```
 
 The example prints a message through `srun`, then sleeps for 15 seconds so you
-can see it in the queue. Once it finishes, `squeue` will be empty. Read its output
+can see it in the queue. To use both nodes, add `#SBATCH --nodes=2` to a
+script, or try `srun -N2 hostname`. Once it finishes, `squeue` will be empty. Read its output
 on Windows:
 
 ```powershell
 Get-Content jobs/hello-*.out
 ```
 
-The `jobs` directory is shared with `/workspace` in the container. Put your own
+The `jobs` directory is shared with `/workspace` in every container. Put your own
 scripts and input files there; job output appears there too. Paths used inside
 jobs must be Linux paths, such as `/workspace/input.txt`.
 
 For an interactive Linux shell with Slurm commands available:
 
 ```powershell
-docker compose exec --user student slurm bash
+docker compose exec --user student controller bash
 ```
 
 Inside that shell, try `sinfo`, `squeue`, or `srun hostname`. Type `exit` to leave.
@@ -59,17 +65,17 @@ Cancel a job using `scancel JOB_ID` inside the shell, or prefix it with
 ```powershell
 docker compose stop
 docker compose start --wait
-docker compose logs --tail 100 slurm
+docker compose logs --tail 100 controller
 ```
 
-`stop` preserves container state. To remove the container and start fresh:
+`stop` preserves container state. To remove the containers and start fresh:
 
 ```powershell
 docker compose down
 docker compose up -d --wait
 ```
 
-Files in `jobs` survive removal, but Slurm's internal state and job IDs reset.
+Files in `jobs` and the MUNGE key survive removal, but Slurm's internal state and job IDs reset.
 After changing the Dockerfile or files under `docker`, rebuild using
 `docker compose up --build -d --wait`.
 
@@ -80,9 +86,9 @@ converts `.sbatch` files already in `jobs` to LF.
 
 ## Scope
 
-This uses Ubuntu 22.04's packaged Slurm, a virtual two-CPU node, and a single
-partition. CPU counts are scheduling slots, not dedicated physical cores.
-It does not configure GPUs, accounting (`sacct`), multiple nodes, or cgroup
+This uses Ubuntu 22.04's packaged Slurm, two virtual two-CPU compute nodes,
+and a single partition. CPU counts are scheduling slots, not dedicated physical cores.
+It does not configure GPUs, accounting (`sacct`), or cgroup
 enforcement of job CPU/memory limits. Run trusted practice jobs here; this is
 a local learning environment rather than a production cluster. No host ports
 or privileged-container access are required.
