@@ -1,0 +1,13 @@
+services:
+  slurm:
+    build: .
+    hostname: slurm
+    init: true
+    volumes:
+      - ./jobs:/workspace
+    healthcheck:
+      test: ["CMD-SHELL", "scontrol ping | grep -q 'is UP' && sinfo -h -o '%T' | grep -Eq '^(idle|allocated|mixed)$$'"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
