@@ -1,13 +1,38 @@
+x-slurm-node: &slurm-node
+  build: .
+  init: true
+  volumes:
+    - ./jobs:/workspace
+  secrets:
+    - munge.key
+  healthcheck:
+    test: ["CMD-SHELL", "scontrol ping | grep -q 'is UP' && sinfo -h -o '%T' | grep -Eq '^(idle|allocated|mixed)$$'"]
+    interval: 5s
+    timeout: 5s
+    retries: 12
+    start_period: 10s
+
 services:
-  slurm:
-    build: .
-    hostname: slurm
-    init: true
-    volumes:
-      - ./jobs:/workspace
-    healthcheck:
-      test: ["CMD-SHELL", "scontrol ping | grep -q 'is UP' && sinfo -h -o '%T' | grep -Eq '^(idle|allocated|mixed)$$'"]
-      interval: 5s
-      timeout: 5s
-      retries: 12
-      start_period: 10s
+  controller:
+    <<: *slurm-node
+    hostname: controller
+    environment:
+      SLURM_ROLE: controller
+  slurm1:
+    <<: *slurm-node
+    hostname: slurm1
+    environment:
+      SLURM_ROLE: compute
+    depends_on:
+      - controller
+  slurm2:
+    <<: *slurm-node
+    hostname: slurm2
+    environment:
+      SLURM_ROLE: compute
+    depends_on:
+      - controller
+
+secrets:
+  munge.key:
+    file: ./docker/munge.key
