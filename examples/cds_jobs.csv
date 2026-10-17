@@ -1,0 +1,9 @@
+trace_id,job_id,submit_time,runtime,time_limit,nodes,cpus_per_node,memory_mb_per_node,gpus_per_node,account,qos,architecture,gpu_type,allowed_nodes
+cds-example,llm-batch,0,40,60,1,8,8192,2,alice,normal,x86_64,rtx2080ti,compute1
+cds-example,arm-01,0,8,12,1,4,2048,0,bob,normal,aarch64,,
+cds-example,cpu-01,0,15,20,1,20,8192,0,bob,normal,x86_64,,compute2
+cds-example,inference-01,2,3,8,1,2,1024,1,bob,urgent,x86_64,rtx2080ti,
+cds-example,preprocess,3,12,20,1,4,2048,0,alice,normal,x86_64,,
+cds-example,arm-02,4,2,5,1,2,512,0,alice,urgent,aarch64,,
+cds-example,inference-02,4,4,8,1,2,1024,1,alice,normal,x86_64,rtx2080ti,
+cds-example,cpu-02,8,6,12,1,24,12000,0,bob,normal,x86_64,,

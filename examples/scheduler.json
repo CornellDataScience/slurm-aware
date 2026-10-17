@@ -1,0 +1,18 @@
+{
+  "cluster": {
+    "nodes": 4,
+    "cpus_per_node": 2,
+    "memory_mb_per_node": 1024,
+    "gpus_per_node": 0
+  },
+  "scheduler": "easy_backfill",
+  "max_age_seconds": 120,
+  "favor_small": true,
+  "schedule_interval_seconds": 5,
+  "fairshare_half_life_seconds": 600,
+  "accounts": {
+    "alice": {"share": 1, "initial_usage_cpu_seconds": 0, "priority": 1},
+    "bob": {"share": 1, "initial_usage_cpu_seconds": 0, "priority": 1}
+  },
+  "qos_priorities": {"normal": 1, "urgent": 2}
+}

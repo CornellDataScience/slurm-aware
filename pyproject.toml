@@ -1,0 +1,25 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "slurm-aware"
+version = "0.1.0"
+description = "Deterministic priority-weight simulation for Slurm-Aware"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+slurm-sim = "slurm_aware.sim_cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8,<10", "ruff>=0.11,<1"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]

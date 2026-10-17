@@ -84,6 +84,59 @@ and using Linux containers. If a new script produces an error about DOS line
 breaks, save it with LF line endings in your editor. The startup script also
 converts `.sbatch` files already in `jobs` to LF.
 
+## Priority-weight simulator (current focus)
+
+The simulator evaluates **fixed priority weights** by replaying workload traces
+and calculating mean submission-to-completion time. The **CDS cluster profile**
+uses named workers with their documented CPU, RAM, GPU, and architecture
+constraints. It lists compute1–compute4 and excludes the orca head node from
+compute capacity. **Three workers are enabled; compute4's hardware inventory
+was not published in the sources inspected.** The enabled subset has 56 logical
+CPU slots and two known RTX 2080 Ti GPUs.
+
+See [the cluster profile and sources](docs/cds-cluster.md) for the hardware,
+unknowns, and optional resource reservations for persistent services. The
+simulator runs locally without Docker or a runtime prediction model. The Docker
+playground above still has two compute containers; its configuration is separate.
+
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then run:
+
+```sh
+uv sync --locked
+uv run slurm-sim evaluate --workload examples/cds_jobs.csv --config examples/cds_cluster.json --weights examples/priority_weights.json --output artifacts/cds-simulator-example
+```
+
+The eight-job example has a mean response time of **21.875 simulated seconds**.
+Results go to `artifacts/cds-simulator-example/report.json` and `schedule.csv`. The report
+records the complete configuration, weight vector, input checksum, aggregate
+metrics, and per-trace metrics. The schedule lists each job's allocation,
+start/end times, wait/response times, and priority factors at dispatch.
+
+Generate a larger repeatable experiment with arrivals and queue contention:
+
+```sh
+uv run slurm-sim generate --config examples/cds_cluster.json --traces 5 --jobs 200 --seed 42 --output data/generated/cds-scheduling.csv
+uv run slurm-sim evaluate --workload data/generated/cds-scheduling.csv --config examples/cds_cluster.json --weights examples/priority_weights.json --output artifacts/cds-simulator
+```
+
+Change any supported weight in `examples/priority_weights.json`, then replay the
+same workload into another output directory to compare scores. These example
+weights are illustrative, not optimized. Every replay resets the cluster and
+account usage. Generated files are ignored by Git; commands replace existing
+outputs at their selected destinations.
+
+Omitting `--config` still selects a generic four-node cluster with two CPU slots
+per node. `examples/scheduler.json` and `examples/scheduling_jobs.csv` retain the
+earlier toy experiment, whose mean response time is 18.667 simulated seconds.
+
+This evaluator implements strict priority and an **EASY backfill
+approximation**, plus a **flat classic fair-share approximation**. It does not
+reproduce Slurm's full backfill or default Fair Tree algorithm. Simulator results
+need comparison with real Slurm before being used to configure a cluster.
+
+See [the simulator guide](docs/simulator.md) for the Python objective function,
+workload schema, supported factors, exact assumptions, and tests.
+
 ## Scope
 
 This uses Ubuntu 22.04's packaged Slurm, two virtual two-CPU compute nodes,

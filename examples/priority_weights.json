@@ -1,0 +1,11 @@
+{
+  "age": 1000,
+  "fairshare": 1000,
+  "job_size": 1000,
+  "association": 0,
+  "partition": 0,
+  "qos": 500,
+  "tres_cpu": 0,
+  "tres_memory": 0,
+  "tres_gpu": 0
+}
