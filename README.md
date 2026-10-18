@@ -125,6 +125,19 @@ weights are illustrative, not optimized. Every replay resets the cluster and
 account usage. Generated files are ignored by Git; commands replace existing
 outputs at their selected destinations.
 
+Compare multiple weight sets in one run (the first is the baseline):
+
+```sh
+uv run slurm-sim compare --workload examples/cds_jobs.csv --config examples/cds_cluster.json --weights current=examples/priority_weights.json --weights age_only=examples/age_only_weights.json --output artifacts/comparison
+```
+
+The command prints a table ranked by average response time and writes
+`comparison.md`, `comparison.csv`, and `comparison.json`. It includes queue wait,
+slowdown, CPU/GPU allocation utilization, throughput, and response improvement
+relative to the baseline. Each candidate also gets its own report and job schedule.
+Use the generated workload above for larger comparisons. This tool evaluates
+supplied weights; it does not train an ML model or optimize weights.
+
 Omitting `--config` still selects a generic four-node cluster with two CPU slots
 per node. `examples/scheduler.json` and `examples/scheduling_jobs.csv` retain the
 earlier toy experiment, whose mean response time is 18.667 simulated seconds.

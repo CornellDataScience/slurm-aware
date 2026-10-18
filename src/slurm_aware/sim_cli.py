@@ -6,6 +6,7 @@ import argparse
 import csv
 import hashlib
 import json
+import re
 from dataclasses import asdict
 from pathlib import Path
 
@@ -127,6 +128,7 @@ def _write_results(
                     "finish_time": run.finish_time,
                     "wait_time": run.wait_time,
                     "response_time": run.response_time,
+                    "slowdown": run.response_time / run.job.runtime,
                     "allocated_nodes": ";".join(
                         config.cluster.inventory[node].name for node in run.allocated_nodes
                     ),
@@ -141,6 +143,115 @@ def _write_results(
         writer.writerows(rows)
     (output / "report.json").write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
     return report
+
+
+def compare_weights(args: argparse.Namespace, config: SimulationConfig) -> None:
+    """Replay every candidate independently, retaining auditable per-policy results."""
+    candidates = {}
+    sources = [args.workload, args.config]
+    for specification in args.weights:
+        name, separator, filename = specification.partition("=")
+        if not separator or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", name):
+            raise ValueError("Use --weights NAME=PATH; names may contain letters, digits, - and _.")
+        if name.casefold() in {key.casefold() for key in candidates}:
+            raise ValueError(f"Duplicate candidate name: {name}")
+        path = Path(filename)
+        candidates[name] = load_weights(path)
+        sources.append(path)
+    if len(candidates) < 2:
+        raise ValueError("Comparison requires at least two named weight files.")
+
+    outputs = [args.output / f"comparison.{suffix}" for suffix in ("json", "csv", "md")]
+    outputs.extend(
+        args.output / name / filename
+        for name in candidates
+        for filename in ("report.json", "schedule.csv")
+    )
+    resolved_outputs = {path.resolve() for path in outputs}
+    if any(source and source.resolve() in resolved_outputs for source in sources):
+        raise ValueError("Output paths must not overwrite workload/configuration/weights.")
+
+    traces = read_traces(args.workload)
+    # Finish all simulations before writing any results, so invalid candidates leave no reports.
+    simulations = {
+        name: {trace: simulate(jobs, weights, config) for trace, jobs in traces.items()}
+        for name, weights in candidates.items()
+    }
+    reports = {
+        name: _write_results(args.output / name, results, config, candidates[name], args.workload)
+        for name, results in simulations.items()
+    }
+    baseline = next(iter(candidates))
+    baseline_response = reports[baseline]["aggregate"]["mean_response_time_seconds"]
+    rows = []
+    for name, report in reports.items():
+        metrics = report["aggregate"]
+        rows.append(
+            {
+                "policy": name,
+                **metrics,
+                "response_improvement_percent": 100
+                * (baseline_response - metrics["mean_response_time_seconds"])
+                / baseline_response,
+            }
+        )
+    rows.sort(key=lambda row: row["mean_response_time_seconds"])
+    comparison = {
+        "baseline": baseline,
+        "ranking": "ascending job-weighted mean response time; ties preserve input order",
+        "improvement": "positive response_improvement_percent means lower than baseline",
+        "simulator_version": SIMULATOR_VERSION,
+        "workload_sha256": reports[baseline]["workload_sha256"],
+        "config": config_dict(config),
+        "limitations": reports[baseline]["limitations"],
+        "results": rows,
+        "policies": {
+            name: {"weights": report["weights"], "traces": report["traces"]}
+            for name, report in reports.items()
+        },
+    }
+    (args.output / "comparison.json").write_text(
+        json.dumps(comparison, indent=2, allow_nan=False) + "\n"
+    )
+    with (args.output / "comparison.csv").open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+    lines = [
+        "# Priority weight comparison",
+        "",
+        f"Baseline: **{baseline}**. All policies replay the same workload and cluster settings.",
+        "",
+        "| Policy | Response (s) | Wait (s) | P95 wait (s) | Slowdown "
+        "| CPU | GPU | Jobs/s | Gain |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for row in rows:
+        gpu = "N/A" if row["gpu_utilization"] is None else f"{row['gpu_utilization']:.1%}"
+        lines.append(
+            f"| {row['policy']} | {row['mean_response_time_seconds']:.3f} | "
+            f"{row['mean_wait_time_seconds']:.3f} | {row['p95_wait_time_seconds']:.3f} | "
+            f"{row['mean_slowdown']:.3f} | {row['cpu_utilization']:.1%} | {gpu} | "
+            f"{row['throughput_jobs_per_second']:.4f} | "
+            f"{row['response_improvement_percent']:+.2f}% |"
+        )
+    lines.extend(
+        [
+            "",
+            "Response, wait, and slowdown columns show job-weighted means, except P95 wait.",
+            "Slowdown = response / actual runtime. Gain is response reduction versus baseline.",
+            "Throughput = completed jobs / summed trace durations "
+            "(first submission to last completion).",
+            "CPU/GPU utilization measures allocated capacity, not measured hardware activity.",
+            "",
+            "Results apply to these workloads; no model is trained or weights optimized.",
+            "The simulator approximates Slurm; see each policy's report and schedule for details.",
+        ]
+    )
+    summary = "\n".join(lines) + "\n"
+    (args.output / "comparison.md").write_text(summary)
+    print(summary)
+    print(f"Comparison and per-policy reports: {args.output}")
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -163,12 +274,26 @@ def main(argv: list[str] | None = None) -> None:
     evaluate.add_argument("--config", type=Path)
     evaluate.add_argument("--weights", type=Path)
     evaluate.add_argument("--output", type=Path, default=Path("artifacts/simulator"))
+    compare = commands.add_parser("compare", help="Compare named weights on identical traces.")
+    compare.add_argument("--workload", type=Path, required=True)
+    compare.add_argument("--config", type=Path)
+    compare.add_argument(
+        "--weights",
+        action="append",
+        required=True,
+        metavar="NAME=PATH",
+        help="Repeat for each candidate; the first is the comparison baseline.",
+    )
+    compare.add_argument("--output", type=Path, default=Path("artifacts/comparison"))
     args = parser.parse_args(argv)
     try:
         config = load_config(args.config)
         print(f"Profile: {config.profile_name}")
         for note in config.profile_notes:
             print(f"  {note}")
+        if args.command == "compare":
+            compare_weights(args, config)
+            return
         if args.command == "generate":
             metadata_path = args.output.with_suffix(".metadata.json")
             if args.output.resolve() == metadata_path.resolve():

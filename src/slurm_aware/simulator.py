@@ -450,6 +450,7 @@ def _percentile(values: Sequence[float], fraction: float) -> float:
 def _job_metrics(runs: Sequence[JobResult]) -> dict[str, float | int]:
     waits = [run.wait_time for run in runs]
     responses = [run.response_time for run in runs]
+    slowdowns = [run.response_time / run.job.runtime for run in runs]
     return {
         "completed_jobs": len(runs),
         "mean_response_time_seconds": fmean(responses),
@@ -457,6 +458,8 @@ def _job_metrics(runs: Sequence[JobResult]) -> dict[str, float | int]:
         "p95_response_time_seconds": _percentile(responses, 0.95),
         "p95_wait_time_seconds": _percentile(waits, 0.95),
         "max_wait_time_seconds": max(waits),
+        "mean_slowdown": fmean(slowdowns),
+        "p95_slowdown": _percentile(slowdowns, 0.95),
     }
 
 
@@ -537,6 +540,7 @@ def simulate(
     metrics = _job_metrics(results)
     span = max(run.finish_time for run in results) - min(job.submit_time for job in jobs)
     metrics["makespan_seconds"] = span
+    metrics["throughput_jobs_per_second"] = len(results) / span
     metrics["cpu_utilization"] = math.fsum(
         run.job.total_cpus * run.job.runtime for run in results
     ) / (config.cluster.available_cpus * span)
@@ -562,6 +566,7 @@ def aggregate_metrics(results: Mapping[str, SimulationResult]) -> dict[str, floa
     span = math.fsum(result.metrics["makespan_seconds"] for result in results.values())
     metrics["traces"] = len(results)
     metrics["total_trace_span_seconds"] = span
+    metrics["throughput_jobs_per_second"] = metrics["completed_jobs"] / span
     metrics["cpu_utilization"] = (
         math.fsum(
             result.metrics["cpu_utilization"] * result.metrics["makespan_seconds"]

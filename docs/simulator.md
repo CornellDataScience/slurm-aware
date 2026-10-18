@@ -216,8 +216,45 @@ the outcome of a different policy; replay recomputes those waits.
 
 ## Verification and next boundary
 
+### Comparing weight sets
+
 ```sh
-uv run pytest tests/test_simulator.py tests/test_cluster_profile.py
+uv run slurm-sim compare --workload examples/cds_jobs.csv --config examples/cds_cluster.json --weights current=examples/priority_weights.json --weights age_only=examples/age_only_weights.json --output artifacts/comparison
+```
+
+Repeat `--weights NAME=PATH` for at least two candidates. Names must be unique
+(case-insensitive) and contain only letters, digits, hyphens, or underscores,
+starting with a letter or digit. Omitted weight fields use the same defaults as
+`evaluate`; the supplied age-only example explicitly zeros all other weights.
+The first candidate is the baseline. The shared configuration, scheduler mode,
+workloads, and initial usage remain identical for every candidate. Each replay
+starts fresh. Age-only still uses the configured backfill policy, eligibility,
+and job nice/site adjustments; it is not a strict FIFO baseline.
+
+Results are ranked by pooled, job-weighted mean response time. Equal scores
+retain candidate input order. Positive improvement means a percentage reduction
+in response time versus the first candidate. This ranking describes the supplied
+traces only and does not establish statistical significance or generalization.
+
+`comparison.md` is a readable summary, `comparison.csv` contains aggregate metrics,
+and `comparison.json` includes effective weights, configuration, workload checksum,
+limitations, and per-trace metrics. Each named subdirectory contains `report.json`
+and `schedule.csv`, as with `evaluate`. Existing outputs at these paths are replaced;
+inputs cannot be overwritten. Unrelated files or older candidate directories are
+left alone; the current comparison files identify the candidates in this run.
+
+Both evaluation and comparison now report mean/P95 slowdown, calculated per job
+as `(finish - submit) / runtime`. This is ordinary, unbounded slowdown, so very
+short jobs can have large values. Throughput is completed jobs divided by the
+sum of trace spans, each from first submission to final completion, including
+idle gaps. It is not an average of per-trace throughput rates. CPU/GPU utilization
+measures allocated resource-time, not measured CPU/GPU activity. No memory
+utilization metric is currently reported. Per-job schedules also include slowdown.
+
+### Checks
+
+```sh
+uv run pytest
 uv run ruff check .
 uv run ruff format --check .
 ```
