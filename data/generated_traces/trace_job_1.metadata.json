@@ -1,0 +1,95 @@
+{
+  "source": "synthetic scheduling workload; no measured cluster runtimes",
+  "generator_version": 2,
+  "seed": 42,
+  "traces": 1000,
+  "jobs_per_trace": 200,
+  "offered_load": 0.85,
+  "arrival_pattern": "bursty",
+  "config": {
+    "cluster": {
+      "node_specs": [
+        {
+          "name": "compute1",
+          "cpus": 32,
+          "memory_mb": 31921,
+          "gpus": 2,
+          "architecture": "x86_64",
+          "gpu_type": "rtx2080ti",
+          "reserved_cpus": 0,
+          "reserved_memory_mb": 0,
+          "reserved_gpus": 0,
+          "enabled": true
+        },
+        {
+          "name": "compute2",
+          "cpus": 20,
+          "memory_mb": 15678,
+          "gpus": null,
+          "architecture": "x86_64",
+          "gpu_type": null,
+          "reserved_cpus": 0,
+          "reserved_memory_mb": 0,
+          "reserved_gpus": 0,
+          "enabled": true
+        },
+        {
+          "name": "compute3",
+          "cpus": 4,
+          "memory_mb": 7937,
+          "gpus": 0,
+          "architecture": "aarch64",
+          "gpu_type": null,
+          "reserved_cpus": 0,
+          "reserved_memory_mb": 0,
+          "reserved_gpus": 0,
+          "enabled": true
+        },
+        {
+          "name": "compute4",
+          "cpus": null,
+          "memory_mb": null,
+          "gpus": null,
+          "architecture": null,
+          "gpu_type": null,
+          "reserved_cpus": 0,
+          "reserved_memory_mb": 0,
+          "reserved_gpus": 0,
+          "enabled": false
+        }
+      ],
+      "head_node": "orca"
+    },
+    "scheduler": "easy_backfill",
+    "max_age_seconds": 604800,
+    "favor_small": false,
+    "schedule_interval_seconds": 30,
+    "fairshare_half_life_seconds": 604800,
+    "accounts": {
+      "alice": {
+        "share": 1,
+        "initial_usage_cpu_seconds": 0,
+        "priority": 1
+      },
+      "bob": {
+        "share": 1,
+        "initial_usage_cpu_seconds": 0,
+        "priority": 1
+      }
+    },
+    "qos_priorities": {
+      "normal": 1,
+      "urgent": 2
+    },
+    "profile_name": "CDS documented hardware; compute4 inventory incomplete",
+    "profile_notes": [
+      "Source: FA25 slides and CornellDataScience/computecluster commit 5d281958 (2026-05-28); see docs/cds-cluster.md.",
+      "compute4 is listed but disabled: its CPU, RAM, GPU count/model and architecture were not published in the inspected inventory.",
+      "compute2 GPU inventory is unknown; no GPU capacity is modeled there.",
+      "CPU slots use documented logical CPU counts. RAM uses 2025-12-09 MemTotal snapshots, not current free memory or verified Slurm RealMemory.",
+      "Account shares, QoS, priority timing and weights are experiment settings. Persistent-service reservations default to zero."
+    ],
+    "partition_name": "compute"
+  },
+  "workload_sha256": "87e7d14c4b4f42764e7e8128a52e6e59f04bf39f99025f6a719fc39fea4269de"
+}

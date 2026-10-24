@@ -11,6 +11,14 @@ dependencies = []
 
 [project.scripts]
 slurm-sim = "slurm_aware.sim_cli:main"
+slurm-rl-train = "slurm_aware.rl.train:main"
+slurm-rl-evaluate = "slurm_aware.rl.evaluate:main"
+
+[project.optional-dependencies]
+rl = [
+    "numpy>=2.4.6",
+    "torch>=2.14.1",
+]
 
 [dependency-groups]
 dev = ["pytest>=8,<10", "ruff>=0.11,<1"]

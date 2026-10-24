@@ -150,6 +150,21 @@ need comparison with real Slurm before being used to configure a cluster.
 See [the simulator guide](docs/simulator.md) for the Python objective function,
 workload schema, supported factors, exact assumptions, and tests.
 
+### Learning weights with a policy network
+
+`src/slurm_aware/rl/` trains a small PyTorch policy (REINFORCE, framed as a
+contextual bandit) that maps a trace's summary features to priority weights,
+using the simulator as its reward. It needs the optional `rl` extra:
+
+```sh
+uv sync --extra rl
+uv run slurm-rl-train
+uv run slurm-rl-evaluate --checkpoint artifacts/rl/best.pt --split test
+```
+
+See [the RL guide](docs/rl.md) for a plain-language explanation, every option,
+how to read the logs and evaluation table, and current results.
+
 ## Scope
 
 This uses Ubuntu 22.04's packaged Slurm, two virtual two-CPU compute nodes,
