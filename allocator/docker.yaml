@@ -1,0 +1,24 @@
+name: allocator-demo
+
+services:
+  login:
+    build: .
+    command:
+      - /app/target/release/allocator
+      - compute1:7001
+      - compute2:7001
+    depends_on:
+      - compute1
+      - compute2
+
+  compute1:
+    build: .
+    command:
+      - /app/target/release/compute-node
+      - 0.0.0.0:7001
+
+  compute2:
+    build: .
+    command:
+      - /app/target/release/compute-node
+      - 0.0.0.0:7001

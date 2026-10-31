@@ -1,0 +1,16 @@
+[package]
+name = "cluster-allocator"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+# Intentionally empty: networking, CLI parsing, and tests use only std.
+
+[[bin]]
+name = "allocator"
+path = "src/bin/allocator.rs"
+
+[[bin]]
+name = "compute-node"
+path = "src/bin/compute-node.rs"
