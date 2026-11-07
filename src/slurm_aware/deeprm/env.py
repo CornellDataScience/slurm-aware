@@ -7,6 +7,11 @@ encoded as `backlog_size` cells, saturating when the queue exceeds that size.
 The backlog itself is unbounded; no jobs are dropped. All observations are
 flattened into one float32 vector.
 
+`EnvConfig(observation="features")` swaps the images for the same information as
+numbers (see `feature_layout`): per slot [present, demand / capacity per resource,
+duration / T], then free capacity / capacity for each of the next T timesteps and
+resource, then the saturated backlog fraction. Every value lies in [0, 1].
+
 Actions: 0 = void (NOP); 1..M = schedule the job in that slot. A valid schedule
 returns reward 0 and freezes time, so several jobs can start at one timestamp.
 Void, an empty slot or a job that does not fit advances to the next arrival or
@@ -37,6 +42,7 @@ from slurm_aware.deeprm.backend import ClusterBackend, InProcessBackend
 from slurm_aware.deeprm.jobs import ClusterSpec, Job, check_jobset
 
 VOID = 0
+OBSERVATIONS = ("image", "features")
 _COMPLETION, _ARRIVAL = 0, 1  # completions sort before arrivals at the same time
 Policy = Callable[["DeepRMEnv"], int]  # any scheduler: observe the env, return an action
 
@@ -47,10 +53,42 @@ class EnvConfig:
     backlog_size: int = 60  # observation cells, not a queue capacity
     lookahead: int = 20  # T: image width, and the longest placeable job
     max_time: int = 500  # truncation cap in timesteps (arrivals end at the generator horizon)
+    observation: str = "image"  # "image" (paper) or "features" (numbers per job)
 
     def __post_init__(self) -> None:
         if min(self.num_slots, self.lookahead, self.max_time) < 1 or self.backlog_size < 0:
             raise ValueError("num_slots, lookahead and max_time must be >= 1; backlog >= 0.")
+        if self.observation not in OBSERVATIONS:
+            raise ValueError(f"observation must be one of {OBSERVATIONS}.")
+
+
+@dataclass(frozen=True)
+class FeatureLayout:
+    """Shape of a "features" observation: slots x per-job features, then cluster, backlog."""
+
+    num_slots: int
+    n_resources: int
+    lookahead: int
+
+    @property
+    def job_features(self) -> int:
+        return self.n_resources + 2  # present flag, demand per resource, duration
+
+    @property
+    def jobs_size(self) -> int:
+        return self.num_slots * self.job_features
+
+    @property
+    def cluster_size(self) -> int:
+        return self.lookahead * self.n_resources
+
+    @property
+    def size(self) -> int:
+        return self.jobs_size + self.cluster_size + 1
+
+
+def feature_layout(spec: ClusterSpec, config: EnvConfig) -> FeatureLayout:
+    return FeatureLayout(config.num_slots, spec.n_resources, config.lookahead)
 
 
 @dataclass
@@ -82,7 +120,12 @@ class DeepRMEnv:
         self.track_decisions = track_decisions
         self.n_actions = config.num_slots + 1
         self._image_size = sum(spec.capacities) * config.lookahead
-        self.observation_size = (1 + config.num_slots) * self._image_size + config.backlog_size
+        self.layout = feature_layout(spec, config)
+        self.observation_size = (
+            self.layout.size
+            if config.observation == "features"
+            else (1 + config.num_slots) * self._image_size + config.backlog_size
+        )
         self.jobs: list[Job] = []
         self.done = True
         self.truncated = False
@@ -145,6 +188,8 @@ class DeepRMEnv:
     # -- State -----------------------------------------------------------------------
 
     def observation(self) -> np.ndarray:
+        if self.config.observation == "features":
+            return self._feature_observation()
         cfg, T = self.config, self.config.lookahead
         obs = np.zeros(self.observation_size, dtype=np.float32)
         offset = 0
@@ -160,6 +205,19 @@ class DeepRMEnv:
                 offset += self._image_size
         obs[offset : offset + min(len(self.backlog), cfg.backlog_size)] = 1.0
         return obs
+
+    def _feature_observation(self) -> np.ndarray:
+        layout, caps = self.layout, np.array(self.spec.capacities, dtype=np.float32)
+        jobs = np.zeros((layout.num_slots, layout.job_features), dtype=np.float32)
+        for m, job in enumerate(self.slots):
+            if job is not None:
+                jobs[m, 0] = 1.0
+                jobs[m, 1:-1] = np.array(job.demand) / caps
+                jobs[m, -1] = job.duration / self.config.lookahead
+        cluster = self.backend.available() / caps
+        size = self.config.backlog_size
+        backlog = min(len(self.backlog), size) / size if size else 0.0
+        return np.concatenate([jobs.ravel(), cluster.ravel(), [backlog]]).astype(np.float32)
 
     def image_shapes(self) -> list[tuple[str, int, int]]:
         """(name, rows, cols) of each image in observation order, for reshaping/plots."""

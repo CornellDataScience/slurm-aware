@@ -21,7 +21,7 @@ See the [archive index](../archive/README.md) for the retired and deferred work.
 | `backend.py` | `ClusterBackend` interface and the in-process `InProcessBackend` |
 | `env.py` | `DeepRMEnv`: Gym-style `reset()` / `step()`, images, reward, `run_episode` |
 | `gym_env.py` | `DeepRMGymEnv`: Gymnasium spaces, seeded workloads, registration |
-| `policy.py` | `PolicyNetwork` (MLP → softmax over actions), `NetworkPolicy` wrapper |
+| `policy.py` | `PolicyNetwork` (paper's MLP on images), `AttentionPolicy` (on per-job numbers), `NetworkPolicy` wrapper |
 | `train.py` | REINFORCE with the per-decision baseline, workers, logging, checkpoints |
 | `baselines.py` | `SJF`, `Packer`, `TetrisStar`, `RandomFit` as env policies |
 | `evaluate.py` | Slowdown vs. load, withholding/job-size analysis, training cost, plots |
@@ -88,6 +88,43 @@ then wait for A's completion and C's arrival at time 3. Start B and C together:
 The clock visits `0 → 1 → 3 → 4 → 5`, and total reward is `−4`.
 `test_hand_calculated_event_schedule_and_rewards` verifies this schedule.
 
+## Attention policy (optional, not in the paper)
+
+`--policy attention` replaces the paper's MLP over flattened images with a network
+that reads the same information as numbers. Only the input and the network
+change; the generator, environment rules, reward, actions and REINFORCE are
+unchanged, so both policies train and test on identical jobsets.
+
+**Input** (`EnvConfig(observation="features")`, all values in [0, 1]):
+
+| Part | Shape | Contents |
+| --- | --- | --- |
+| Jobs | M × (R + 2) | per slot: present flag, demand ÷ capacity per resource, duration ÷ T |
+| Cluster | T × R | free units ÷ capacity for each of the next T timesteps |
+| Backlog | 1 | waiting jobs beyond the slots ÷ `backlog_size`, saturating at 1 |
+
+This drops only the shading that tells running jobs apart in the cluster image.
+
+**Network** (`AttentionPolicy`):
+
+1. One shared job encoder (2-layer MLP) turns each job's demand and duration
+   into a vector, so a job gets the same score in any slot.
+2. A cluster encoder (2-layer MLP) summarizes the free-capacity grid and backlog.
+3. Transformer encoder layers run over the cluster summary plus the visible jobs,
+   so each job's vector can depend on the other waiting jobs. Empty slots are
+   masked out of attention.
+4. Each job is scored by an MLP on (its vector, the cluster summary); void is
+   scored from the cluster summary. Empty slots share one learned score, so
+   choosing one still behaves exactly as in the image policy.
+
+Defaults, chosen for this branch and not tuned: `embed_dim = 32`,
+`attention_heads = 4`, `attention_layers = 1`, feed-forward width `2 × embed_dim`,
+no dropout. `--attention-layers 0` keeps the shared encoders but removes
+attention, and `--policy mlp --observation features` runs the paper's MLP on the
+numbers. Together they separate the effect of the input, the shared encoder and
+attention. Like the image observation, it omits time since the last arrival and
+how long each job has waited.
+
 ## Defaults chosen during implementation (please review)
 
 These were not in the original spec. All are configurable.
@@ -144,6 +181,8 @@ Useful training options:
 - `--regime bursty`
 - `--train-loads 0.5 0.9 1.3`: cycle jobsets through several loads
 - `--hidden-sizes 64 32`
+- `--policy attention` (with `--embed-dim`, `--attention-heads`,
+  `--attention-layers`), or `--observation features` for the MLP on numbers
 - `--episodes-per-jobset`
 - `--workers N`: parallel rollout processes. Results don't depend on N, because
   each (iteration, jobset) has its own sampling seed.

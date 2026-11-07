@@ -41,9 +41,16 @@ from slurm_aware.deeprm.baselines import SJF
 from slurm_aware.deeprm.env import DeepRMEnv, EnvConfig, run_episode
 from slurm_aware.deeprm.generator import GeneratorConfig, JobTraceGenerator, jobset_seed
 from slurm_aware.deeprm.jobs import Job
-from slurm_aware.deeprm.policy import NetworkPolicy, PolicyNetwork, sample_actions
+from slurm_aware.deeprm.policy import (
+    AttentionPolicy,
+    NetworkPolicy,
+    PolicyModel,
+    PolicyNetwork,
+    sample_actions,
+)
 
 CHECKPOINT_VERSION = 1
+POLICIES = ("mlp", "attention")
 _ROLLOUT_STREAM = 1000  # SeedSequence spawn-key tag for action sampling, apart from jobsets
 _GRAD_CHUNK = 4096  # decisions per forward/backward pass, to bound memory
 
@@ -63,9 +70,16 @@ class TrainConfig:
     backlog_size: int = 60
     lookahead: int = 20
     max_time: int = 500
-    # Network
-    hidden_sizes: tuple[int, ...] = (20,)
-    activation: str = "relu"
+    # Network. "mlp" is the paper's network; "attention" is AttentionPolicy.
+    policy: str = "mlp"
+    # Observation fed to the policy: None picks "image" for mlp, "features" for attention.
+    # An mlp on "features" isolates the effect of the input from the architecture.
+    observation: str | None = None
+    hidden_sizes: tuple[int, ...] = (20,)  # mlp only
+    activation: str = "relu"  # mlp only
+    embed_dim: int = 32  # attention only
+    attention_heads: int = 4  # attention only
+    attention_layers: int = 1  # attention only; 0 = shared encoders without attention
     # REINFORCE
     episodes_per_jobset: int = 20
     iterations: int = 1000
@@ -86,8 +100,19 @@ def generator_config(cfg: TrainConfig) -> GeneratorConfig:
     return gen
 
 
+def observation_mode(cfg: TrainConfig) -> str:
+    if cfg.policy not in POLICIES:
+        raise ValueError(f"policy must be one of {POLICIES}.")
+    mode = cfg.observation or ("features" if cfg.policy == "attention" else "image")
+    if cfg.policy == "attention" and mode != "features":
+        raise ValueError('The attention policy needs observation="features".')
+    return mode
+
+
 def env_config(cfg: TrainConfig) -> EnvConfig:
-    return EnvConfig(cfg.num_slots, cfg.backlog_size, cfg.lookahead, cfg.max_time)
+    return EnvConfig(
+        cfg.num_slots, cfg.backlog_size, cfg.lookahead, cfg.max_time, observation_mode(cfg)
+    )
 
 
 def make_env(cfg: TrainConfig, **kwargs) -> DeepRMEnv:
@@ -103,7 +128,11 @@ def build_jobsets(cfg: TrainConfig, split: str, count: int) -> list[list[Job]]:
     ]
 
 
-def build_network(cfg: TrainConfig, env: DeepRMEnv) -> PolicyNetwork:
+def build_network(cfg: TrainConfig, env: DeepRMEnv) -> PolicyModel:
+    if cfg.policy == "attention":
+        return AttentionPolicy(
+            env.layout, cfg.embed_dim, cfg.attention_heads, cfg.attention_layers
+        )
     return PolicyNetwork(env.observation_size, env.n_actions, cfg.hidden_sizes, cfg.activation)
 
 
@@ -126,7 +155,7 @@ def time_baseline(returns: Sequence[np.ndarray]) -> np.ndarray:
 
 
 def collect_episodes(
-    network: PolicyNetwork, envs: Sequence[DeepRMEnv], jobs: Sequence[Job], rng
+    network: PolicyModel, envs: Sequence[DeepRMEnv], jobs: Sequence[Job], rng
 ) -> list[dict]:
     """Run len(envs) episodes of one jobset in lockstep, batching the policy forward pass."""
     current = [env.reset(jobs)[0] for env in envs]
@@ -148,7 +177,7 @@ def collect_episodes(
 
 
 def accumulate_gradient(
-    network: PolicyNetwork, episodes: Sequence[dict], gamma: float
+    network: PolicyModel, episodes: Sequence[dict], gamma: float
 ) -> tuple[int, dict]:
     """Add sum_t grad log pi * (v_t - b_t) for one jobset's episodes into `.grad`.
 
@@ -257,7 +286,7 @@ class RolloutRunner:
         self.close()
 
 
-def greedy_slowdown(network: PolicyNetwork, env: DeepRMEnv, jobsets) -> float:
+def greedy_slowdown(network: PolicyModel, env: DeepRMEnv, jobsets) -> float:
     """Mean job slowdown of the argmax policy, pooled over jobsets."""
     policy = NetworkPolicy(network, greedy=True)
     slowdowns = [s for js in jobsets for s in run_episode(env, policy, js)["slowdowns"]]
@@ -284,7 +313,7 @@ def config_from_checkpoint(state: Mapping) -> TrainConfig:
     return TrainConfig(**raw)
 
 
-def network_from_checkpoint(state: Mapping) -> tuple[PolicyNetwork, TrainConfig]:
+def network_from_checkpoint(state: Mapping) -> tuple[PolicyModel, TrainConfig]:
     cfg = config_from_checkpoint(state)
     network = build_network(cfg, make_env(cfg))
     network.load_state_dict(state["policy"])
@@ -431,8 +460,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--backlog-size", type=int, default=d.backlog_size)
     parser.add_argument("--lookahead", type=int, default=d.lookahead)
     parser.add_argument("--max-time", type=int, default=d.max_time)
+    parser.add_argument("--policy", choices=POLICIES, default=d.policy)
+    parser.add_argument("--observation", choices=("image", "features"),
+                        help="Default: image for mlp, features for attention")
     parser.add_argument("--hidden-sizes", type=int, nargs="+", default=list(d.hidden_sizes))
     parser.add_argument("--activation", default=d.activation)
+    parser.add_argument("--embed-dim", type=int, default=d.embed_dim)
+    parser.add_argument("--attention-heads", type=int, default=d.attention_heads)
+    parser.add_argument("--attention-layers", type=int, default=d.attention_layers)
     parser.add_argument("--episodes-per-jobset", type=int, default=d.episodes_per_jobset)
     parser.add_argument("--iterations", type=int, default=d.iterations)
     parser.add_argument("--lr", type=float, default=d.lr)
@@ -462,8 +497,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             backlog_size=args.backlog_size,
             lookahead=args.lookahead,
             max_time=args.max_time,
+            policy=args.policy,
+            observation=args.observation,
             hidden_sizes=tuple(args.hidden_sizes),
             activation=args.activation,
+            embed_dim=args.embed_dim,
+            attention_heads=args.attention_heads,
+            attention_layers=args.attention_layers,
             episodes_per_jobset=args.episodes_per_jobset,
             iterations=args.iterations,
             lr=args.lr,
