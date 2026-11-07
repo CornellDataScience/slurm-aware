@@ -3,6 +3,10 @@
 A small, two-node Slurm playground running in Docker Desktop. Use it to
 practice submitting jobs or develop software that calls Slurm.
 
+The repository also includes local scheduling simulators and RL training.
+The [DeepRM Gymnasium interface](#deeprm-and-gymnasium) supports direct job
+scheduling with standard RL libraries, without starting Docker.
+
 Docker packages a Linux environment into an **image** (built from `Dockerfile`).
 A **container** is a running instance of that image. Docker Compose uses
 `compose.yaml` to build and start it with the right settings.
@@ -84,7 +88,7 @@ and using Linux containers. If a new script produces an error about DOS line
 breaks, save it with LF line endings in your editor. The startup script also
 converts `.sbatch` files already in `jobs` to LF.
 
-## Priority-weight simulator (current focus)
+## Priority-weight simulator
 
 The simulator evaluates **fixed priority weights** by replaying workload traces
 and calculating mean submission-to-completion time. The **CDS cluster profile**
@@ -164,6 +168,40 @@ uv run slurm-rl-evaluate --checkpoint artifacts/rl/best.pt --split test
 
 See [the RL guide](docs/rl.md) for a plain-language explanation, every option,
 how to read the logs and evaluation table, and current results.
+
+## DeepRM and Gymnasium
+
+`src/slurm_aware/deeprm/` provides an event-driven simulator where an agent
+chooses a visible job to start or NOP to advance to the next event. It models
+pooled CPU, GPU and memory capacity and rewards lower job slowdown. It includes
+REINFORCE training and SJF, Packer and Tetris* baselines.
+
+Install the optional dependencies and open a Python session:
+
+```sh
+uv sync --locked --extra deeprm
+uv run --extra deeprm python
+```
+
+```python
+import gymnasium as gym
+
+env = gym.make("slurm_aware.deeprm.gym_env:SlurmAware-DeepRM-v0")
+observation, info = env.reset(seed=42)
+action = env.action_space.sample()
+observation, reward, terminated, truncated, info = env.step(action)
+env.close()
+```
+
+The Gymnasium adapter exposes job-slot/NOP actions and a flat float32
+observation of the cluster, visible jobs and backlog. Seeded workload generation,
+fixed-trace replay and vector environments are supported. Stable-Baselines3 can
+use the adapter directly; install that library separately.
+
+See [the DeepRM guide](docs/deeprm.md) for the event and reward rules, training
+and evaluation commands, and [Gymnasium usage](docs/deeprm.md#gymnasium-interface)
+for reset options, custom backends and a PPO example. Future reservations and
+preemption are not implemented.
 
 ## Scope
 

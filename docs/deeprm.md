@@ -18,6 +18,7 @@ decision itself, on a pooled cluster model with whole timesteps and resource uni
 | `generator.py` | `JobTraceGenerator`: seeded jobsets, job types, arrival regimes, load, splits |
 | `backend.py` | `ClusterBackend` interface and the in-process `InProcessBackend` |
 | `env.py` | `DeepRMEnv`: Gym-style `reset()` / `step()`, images, reward, `run_episode` |
+| `gym_env.py` | `DeepRMGymEnv`: Gymnasium spaces, seeded workloads, registration |
 | `policy.py` | `PolicyNetwork` (MLP → softmax over actions), `NetworkPolicy` wrapper |
 | `train.py` | REINFORCE with the per-decision baseline, workers, logging, checkpoints |
 | `baselines.py` | `SJF`, `Packer`, `TetrisStar`, `RandomFit` as env policies |
@@ -121,18 +122,18 @@ These were not in the original spec. All are configurable.
 ## Running it
 
 ```sh
-uv sync --extra deeprm
-uv run pytest tests/test_deeprm_*.py
+uv sync --locked --extra deeprm
+uv run --extra deeprm pytest tests/test_deeprm_*.py
 
 # Optional: inspect generated jobsets (training regenerates its own from seeds)
-uv run slurm-deeprm-generate --load 1.1 --regime bursty --output data/generated/deeprm/bursty.json
+uv run --extra deeprm slurm-deeprm-generate --load 1.1 --regime bursty --output data/generated/deeprm/bursty.json
 
 # Train (paper defaults: 100 jobsets x 20 episodes, 1000 iterations, lr 1e-3)
-uv run slurm-deeprm-train --output artifacts/deeprm
-uv run slurm-deeprm-train --output artifacts/deeprm --resume artifacts/deeprm/latest.pt --iterations 1500
+uv run --extra deeprm slurm-deeprm-train --output artifacts/deeprm
+uv run --extra deeprm slurm-deeprm-train --output artifacts/deeprm --resume artifacts/deeprm/latest.pt --iterations 1500
 
 # Evaluate on held-out jobsets at loads 10%..190%
-uv run slurm-deeprm-evaluate --checkpoint artifacts/deeprm/best.pt --output artifacts/deeprm/eval
+uv run --extra deeprm slurm-deeprm-evaluate --checkpoint artifacts/deeprm/best.pt --output artifacts/deeprm/eval
 ```
 
 Useful training options:
@@ -167,6 +168,91 @@ The withholding analysis reports three things:
 - mean slowdown by footprint tercile.
 
 Heuristics never withhold, by construction.
+
+## Gymnasium interface
+
+`DeepRMGymEnv` adapts the event simulator to the
+[Gymnasium API](https://gymnasium.farama.org/api/env/). Open a Python session
+with the `deeprm` dependencies:
+
+```sh
+uv run --extra deeprm python
+```
+
+Then use the registered environment:
+
+```python
+import gymnasium as gym
+
+env = gym.make("slurm_aware.deeprm.gym_env:SlurmAware-DeepRM-v0")
+observation, info = env.reset(seed=42)
+env.action_space.seed(42)  # action sampling has its own RNG
+for _ in range(1000):
+    action = env.action_space.sample()
+    observation, reward, terminated, truncated, info = env.step(action)
+    if terminated or truncated:
+        observation, info = env.reset()
+env.close()
+```
+
+The action space is `Discrete(M + 1)` (0 = NOP, 1..M = job slots). The observation
+space is a flat float32 `Box(0, 1)` containing the existing cluster images, job
+images and backlog cells. Empty or non-fitting slots retain their NOP behavior.
+Scheduling, event timing and the slowdown reward are unchanged. `max_time`
+limits simulated time, not the number of agent decisions. Rendering is not
+implemented. `info["scheduled"]` contains the job ID only when a job starts;
+otherwise that key is absent so vector environments can mask it. The `time`,
+`backlog` and `dropped` info fields retain their existing meanings.
+
+By default, each reset generates a new workload. Repeating `reset(seed=42)`
+reproduces a workload; `reset()` continues the seeded random stream. For a
+custom workload distribution, pass `generator=JobTraceGenerator(...)` with a
+matching cluster spec and `max_duration <= config.lookahead`. The default
+generator uses the CPU/GPU/memory job types above; custom resource names require
+matching job types in `GeneratorConfig`.
+
+To replay a fixed trace on every reset, construct
+`DeepRMGymEnv(spec, config, jobs=jobs)`. To override just one episode, use
+`reset(options={"jobs": jobs})`; the next ordinary reset returns to the configured
+workload source. An empty trace returns zero reward and `terminated=True` on its
+first step. Call `reset()` after either termination or truncation.
+
+The underlying simulator is available as `env.unwrapped.simulator`, including
+its cluster spec, records and slowdown metrics. Gymnasium's `env.spec` remains
+registration metadata. The existing `DeepRMEnv.reset(jobs)`, heuristics and
+REINFORCE training entry points continue to work as before.
+
+The adapter also accepts `backend=` and `track_decisions=`. It can be passed
+directly to [Stable-Baselines3](https://stable-baselines3.readthedocs.io/en/master/guide/custom_env.html).
+That library is optional and is not included in the `deeprm` extra. To run the
+example below, open a Python session with it added for this invocation:
+
+```sh
+uv run --extra deeprm --with stable-baselines3 python
+```
+
+```python
+from stable_baselines3 import PPO
+from slurm_aware.deeprm.gym_env import DeepRMGymEnv
+
+env = DeepRMGymEnv()
+model = PPO("MlpPolicy", env, gamma=1.0, seed=42)
+model.learn(total_timesteps=10_000)
+env.close()
+```
+
+As with the existing trainer, discounts below 1 apply per decision. `gamma=1`
+preserves the undiscounted slowdown objective.
+
+Run the interface checks with:
+
+```sh
+uv run --extra deeprm pytest tests/test_deeprm_gym.py -q
+```
+
+They cover Gymnasium's environment checker, seeded reset sequences, fixed and
+empty workloads, action validation, event/reward equivalence with `DeepRMEnv`,
+termination versus truncation, and vector environment resets.
 
 ## Plugging in a real cluster backend
 
