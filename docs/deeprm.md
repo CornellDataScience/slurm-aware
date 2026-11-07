@@ -132,9 +132,12 @@ uv run --extra deeprm pytest tests/test_deeprm_*.py
 # Optional: inspect generated jobsets (training regenerates its own from seeds)
 uv run --extra deeprm slurm-deeprm-generate --load 1.1 --regime bursty --output data/generated/deeprm/bursty.json
 
-# Train (paper defaults: 100 jobsets x 20 episodes, 1000 iterations, lr 1e-3)
+# Train (100 jobsets x 20 episodes, up to 1000 iterations, lr 1e-3)
 uv run --extra deeprm slurm-deeprm-train --output artifacts/deeprm
 uv run --extra deeprm slurm-deeprm-train --output artifacts/deeprm --resume artifacts/deeprm/latest.pt --iterations 1500
+
+# Five-fold training: 80 training / 20 validation jobsets per fold
+uv run --extra deeprm slurm-deeprm-train --folds 5 --num-jobsets 100 --output artifacts/deeprm/cv
 
 # Evaluate on held-out jobsets at loads 10%..190%
 uv run --extra deeprm slurm-deeprm-evaluate --checkpoint artifacts/deeprm/best.pt --output artifacts/deeprm/eval
@@ -145,6 +148,16 @@ Useful training options:
 - `--train-loads 0.5 0.9 1.3`: cycle jobsets through several loads
 - `--hidden-sizes 64 32`
 - `--episodes-per-jobset`
+- `--early-stopping-patience 10`: stop after this many validation checks without
+  improvement (the default). Set `0` to run all requested iterations.
+- `--early-stopping-min-delta 0.0`: the absolute reduction in greedy validation
+  slowdown that must be exceeded to reset patience. Smaller improvements accumulate
+  against the last patience-reset score; `best.pt` always keeps the lowest score.
+- `--folds 5`: train five independent models on seeded, shuffled splits of the
+  `--num-jobsets` training pool. Each whole jobset is held out once, with the other
+  four folds used for training. At least five jobsets are required; uneven fold
+  sizes differ by at most one. `--val-jobsets` only applies to single-split training
+  (`--folds 1`, the default). The test split remains reserved for evaluation.
 - `--workers N`: parallel rollout processes. Results don't depend on N, because
   each (iteration, jobset) has its own sampling seed.
 
@@ -152,12 +165,35 @@ The defaults come from the paper's cleaner synthetic setup. Heavy-tailed,
 bursty traces may need a lower learning rate, more episodes per jobset or more
 iterations.
 
+Early stopping checks validation every `--eval-every` iterations (default 10)
+and on the final requested iteration. It saves `latest.pt` at the stopping point;
+use `best.pt` for evaluation. Resume restores the stopping settings and counter
+along with the model and optimizer. A run that already stopped stays stopped;
+increasing `--iterations` only extends runs that have not triggered early stopping.
+
 **Outputs** in the training directory:
 - `train_log.csv`, one row per iteration: mean and max return, mean slowdown,
   entropy, decisions per episode, truncated episodes, validation slowdown every
   `eval_every` iterations, and seconds.
 - `latest.pt` and `best.pt` (best greedy validation slowdown). A checkpoint holds
   the full config, so evaluation regenerates the same generator and environment.
+
+With `--folds 5`, each model has its own `fold_1/` through `fold_5/` directory with
+these outputs. The root `cross_validation.json` records each fold's jobset indices,
+best validation slowdown, iteration count and early-stop status, plus the mean
+and population standard deviation of best validation slowdown across folds.
+These are validation scores used for checkpoint selection. Evaluate each fold's
+`best.pt` on the separate test split for test results; no final combined model is
+trained automatically. Resume an individual fold with its checkpoint and output
+directory; the checkpoint restores the fold assignment:
+
+```sh
+uv run --extra deeprm slurm-deeprm-train --resume artifacts/deeprm/cv/fold_1/latest.pt --output artifacts/deeprm/cv/fold_1 --iterations 1500
+uv run --extra deeprm slurm-deeprm-evaluate --checkpoint artifacts/deeprm/cv/fold_1/best.pt --output artifacts/deeprm/cv/fold_1/eval
+```
+
+Resuming a fold updates that fold's logs and checkpoints; the root summary reflects
+the original complete cross-validation run.
 
 **Evaluation** writes:
 - `evaluation.md` and `evaluation.json`

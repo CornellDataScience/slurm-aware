@@ -13,7 +13,7 @@ Gradients from all jobsets are combined into one RMSprop step per iteration. The
 sum is divided by the number of decisions in the batch (a mean, not a sum); RMSprop
 divides by the running gradient RMS, so this only changes the effective epsilon.
 
-Defaults are the paper's. They were tuned for its cleaner setup (bimodal
+REINFORCE defaults are the paper's. They were tuned for its cleaner setup (bimodal
 durations, Bernoulli arrivals, 2 resources); heavy-tailed durations, bursty
 arrivals and 3 resources give much noisier returns and may need a lower learning
 rate, more episodes per jobset or more iterations.
@@ -58,6 +58,8 @@ class TrainConfig:
     train_loads: tuple[float, ...] = (0.7,)
     num_jobsets: int = 100
     val_jobsets: int = 20
+    folds: int = 1
+    fold_index: int = 0  # Zero-based held-out fold, saved for reproducible resume.
     # Environment
     num_slots: int = 10
     backlog_size: int = 60
@@ -76,6 +78,8 @@ class TrainConfig:
     # Bookkeeping
     eval_every: int = 10
     checkpoint_every: int = 10
+    early_stopping_patience: int = 10  # Validation checks without improvement; 0 disables.
+    early_stopping_min_delta: float = 0.0
     workers: int = max(0, min(8, (os.cpu_count() or 2) - 1))
 
 
@@ -105,6 +109,18 @@ def build_jobsets(cfg: TrainConfig, split: str, count: int) -> list[list[Job]]:
 
 def build_network(cfg: TrainConfig, env: DeepRMEnv) -> PolicyNetwork:
     return PolicyNetwork(env.observation_size, env.n_actions, cfg.hidden_sizes, cfg.activation)
+
+
+def fold_jobset_indices(cfg: TrainConfig) -> list[tuple[list[int], list[int]]]:
+    """Seeded K-fold splits of whole jobsets, keeping episodes of a trace together."""
+    if not 2 <= cfg.folds <= cfg.num_jobsets:
+        raise ValueError("folds must be between 2 and num_jobsets for cross-validation.")
+    indices = np.random.default_rng(cfg.seed).permutation(cfg.num_jobsets)
+    folds = np.array_split(indices, cfg.folds)
+    return [
+        (np.concatenate([part for j, part in enumerate(folds) if j != i]).tolist(), val.tolist())
+        for i, val in enumerate(folds)
+    ]
 
 
 def discounted_returns(rewards: Sequence[float], gamma: float) -> np.ndarray:
@@ -311,13 +327,19 @@ def train(
     resume: str | Path | None = None,
     log=functools.partial(print, flush=True),
 ) -> dict:
-    output = Path(cfg.output)
-    output.mkdir(parents=True, exist_ok=True)
     state = load_checkpoint(resume) if resume else None
     if state:
         # Everything but output location, parallelism and total iterations is restored.
         overrides = {"output": cfg.output, "workers": cfg.workers, "iterations": cfg.iterations}
         cfg = replace(config_from_checkpoint(state), **overrides)
+    if cfg.iterations < 1 or cfg.eval_every < 1 or cfg.checkpoint_every < 1:
+        raise ValueError("iterations, eval_every and checkpoint_every must be positive.")
+    if cfg.early_stopping_patience < 0:
+        raise ValueError("early_stopping_patience must be nonnegative (0 disables it).")
+    if not math.isfinite(cfg.early_stopping_min_delta) or cfg.early_stopping_min_delta < 0:
+        raise ValueError("early_stopping_min_delta must be finite and nonnegative.")
+    if cfg.folds < 1 or not 0 <= cfg.fold_index < cfg.folds:
+        raise ValueError("folds must be positive and fold_index must identify an existing fold.")
     torch.manual_seed(cfg.seed)
 
     env = make_env(cfg)
@@ -326,14 +348,23 @@ def train(
         network.parameters(), lr=cfg.lr, alpha=cfg.rmsprop_alpha, eps=cfg.rmsprop_eps
     )
     start, best, elapsed = 0, math.inf, 0.0
+    stopping_best, stale_evals, stopped_early = math.inf, 0, False
     if state:
         network.load_state_dict(state["policy"])
         optimizer.load_state_dict(state["optimizer"])
         start, best, elapsed = state["iteration"] + 1, state["best_val_slowdown"], state["elapsed"]
+        stopping_best = state.get("early_stopping_best", best)
+        stale_evals = state.get("early_stopping_stale_evals", 0)
+        stopped_early = state.get("stopped_early", False)
         log(f"Resumed from {resume} at iteration {start}.")
 
     train_sets = build_jobsets(cfg, "train", cfg.num_jobsets)
-    val_sets = build_jobsets(cfg, "val", cfg.val_jobsets)
+    if cfg.folds == 1:
+        val_sets = build_jobsets(cfg, "val", cfg.val_jobsets)
+    else:
+        train_indices, val_indices = fold_jobset_indices(cfg)[cfg.fold_index]
+        val_sets = [train_sets[i] for i in val_indices]
+        train_sets = [train_sets[i] for i in train_indices]
     if not train_sets or not val_sets:
         raise ValueError("Need at least one training and one validation jobset.")
     sjf_val = float(
@@ -341,6 +372,8 @@ def train(
     )
     log(f"Validation reference: SJF mean slowdown {sjf_val:.3f}")
 
+    output = Path(cfg.output)
+    output.mkdir(parents=True, exist_ok=True)
     log_path = output / "train_log.csv"
     new_log = not (state and log_path.exists())
     last_iteration = start - 1
@@ -350,7 +383,7 @@ def train(
         writer = csv.DictWriter(stream, fieldnames=LOG_FIELDS)
         if new_log:
             writer.writeheader()
-        for iteration in range(start, cfg.iterations):
+        for iteration in range(start, start if stopped_early else cfg.iterations):
             began = time.monotonic()
             grads, n_decisions, stats = runner.gradient(network.state_dict(), iteration)
             optimizer.zero_grad()
@@ -379,6 +412,14 @@ def train(
                 row["val_slowdown"] = greedy_slowdown(network, env, val_sets)
                 is_best = row["val_slowdown"] < best
                 best = min(best, row["val_slowdown"])
+                if row["val_slowdown"] < stopping_best - cfg.early_stopping_min_delta:
+                    stopping_best, stale_evals = row["val_slowdown"], 0
+                else:
+                    stale_evals += 1
+                stopped_early = (
+                    cfg.early_stopping_patience > 0 and stale_evals >= cfg.early_stopping_patience
+                )
+                last = last or stopped_early
             writer.writerow(row)
             stream.flush()
             log(
@@ -401,6 +442,9 @@ def train(
                     "optimizer": optimizer.state_dict(),
                     "iteration": iteration,
                     "best_val_slowdown": best,
+                    "early_stopping_best": stopping_best,
+                    "early_stopping_stale_evals": stale_evals,
+                    "stopped_early": stopped_early,
                     "sjf_val_slowdown": sjf_val,
                     "elapsed": elapsed,
                 }
@@ -408,12 +452,41 @@ def train(
                     _save(output / "latest.pt", checkpoint)
                 if is_best:
                     _save(output / "best.pt", checkpoint)
+            if stopped_early:
+                log(f"Early stopping at iteration {iteration}: {stale_evals} validation checks "
+                    f"without improvement > {cfg.early_stopping_min_delta:g}. "
+                    "Best validation policy is in best.pt.")
+                break
     return {
         "best_val_slowdown": best,
         "sjf_val_slowdown": sjf_val,
         "iterations": last_iteration + 1,
+        "stopped_early": stopped_early,
         "output": str(output),
     }
+
+
+def train_folds(cfg: TrainConfig, log=functools.partial(print, flush=True)) -> dict:
+    """Train a fresh policy per fold; never use test jobsets for model selection."""
+    results = []
+    for index, (train_indices, val_indices) in enumerate(fold_jobset_indices(cfg)):
+        fold_cfg = replace(
+            cfg, fold_index=index, output=str(Path(cfg.output) / f"fold_{index + 1}")
+        )
+        log(f"Fold {index + 1}/{cfg.folds}: {len(train_indices)} training, "
+            f"{len(val_indices)} validation jobsets")
+        result = train(fold_cfg, log=log)
+        results.append({"fold": index + 1, "train_indices": train_indices,
+                        "val_indices": val_indices, **result})
+    scores = [result["best_val_slowdown"] for result in results]
+    summary = {
+        "folds": results,
+        "mean_best_val_slowdown": float(np.mean(scores)),
+        "std_best_val_slowdown": float(np.std(scores)),
+        "output": cfg.output,
+    }
+    (Path(cfg.output) / "cross_validation.json").write_text(json.dumps(summary, indent=2) + "\n")
+    return summary
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -427,6 +500,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--train-loads", type=float, nargs="+", default=list(d.train_loads))
     parser.add_argument("--num-jobsets", type=int, default=d.num_jobsets)
     parser.add_argument("--val-jobsets", type=int, default=d.val_jobsets)
+    parser.add_argument("--folds", type=int, default=d.folds,
+                        help="1 = single split (default); 5 = five-fold training on num-jobsets")
     parser.add_argument("--num-slots", type=int, default=d.num_slots)
     parser.add_argument("--backlog-size", type=int, default=d.backlog_size)
     parser.add_argument("--lookahead", type=int, default=d.lookahead)
@@ -441,6 +516,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--gamma", type=float, default=d.gamma)
     parser.add_argument("--eval-every", type=int, default=d.eval_every)
     parser.add_argument("--checkpoint-every", type=int, default=d.checkpoint_every)
+    parser.add_argument("--early-stopping-patience", type=int, default=d.early_stopping_patience,
+                        help="Validation checks without improvement before stopping (0 disables)")
+    parser.add_argument("--early-stopping-min-delta", type=float,
+                        default=d.early_stopping_min_delta,
+                        help="Minimum absolute validation slowdown reduction to reset patience")
     parser.add_argument("--workers", type=int, default=d.workers, help="0 = no subprocesses")
     parser.add_argument("--resume", help="Checkpoint to continue from (e.g. .../latest.pt)")
     args = parser.parse_args(argv)
@@ -458,6 +538,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             train_loads=tuple(args.train_loads),
             num_jobsets=args.num_jobsets,
             val_jobsets=args.val_jobsets,
+            folds=args.folds,
             num_slots=args.num_slots,
             backlog_size=args.backlog_size,
             lookahead=args.lookahead,
@@ -472,9 +553,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             gamma=args.gamma,
             eval_every=args.eval_every,
             checkpoint_every=args.checkpoint_every,
+            early_stopping_patience=args.early_stopping_patience,
+            early_stopping_min_delta=args.early_stopping_min_delta,
             workers=args.workers,
         )
-        result = train(cfg, resume=args.resume)
+        if args.resume or cfg.folds == 1:
+            result = train(cfg, resume=args.resume)
+        else:
+            result = train_folds(cfg)
     except (OSError, ValueError, KeyError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
