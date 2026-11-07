@@ -13,9 +13,17 @@ dependencies = []
 slurm-sim = "slurm_aware.sim_cli:main"
 slurm-rl-train = "slurm_aware.rl.train:main"
 slurm-rl-evaluate = "slurm_aware.rl.evaluate:main"
+slurm-deeprm-generate = "slurm_aware.deeprm.generator:main"
+slurm-deeprm-train = "slurm_aware.deeprm.train:main"
+slurm-deeprm-evaluate = "slurm_aware.deeprm.evaluate:main"
 
 [project.optional-dependencies]
 rl = [
+    "numpy>=2.4.6",
+    "torch>=2.14.1",
+]
+deeprm = [
+    "matplotlib>=3.10",
     "numpy>=2.4.6",
     "torch>=2.14.1",
 ]
