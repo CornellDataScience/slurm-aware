@@ -79,6 +79,7 @@ class DeepRMEnv:
         self.observation_size = (1 + config.num_slots) * self._image_size + config.backlog_size
         self.jobs: list[Job] = []
         self.done = True
+        self.truncated = False
 
     # -- Gym-style API -------------------------------------------------------------
 
@@ -99,6 +100,7 @@ class DeepRMEnv:
         self._next_arrival = 0
         self._enqueue_arrivals()
         self.done = self._finished()
+        self.truncated = False
         return self.observation(), self._info()
 
     def step(self, action: int) -> tuple[np.ndarray, float, bool, bool, dict]:
@@ -123,7 +125,7 @@ class DeepRMEnv:
         self._enqueue_arrivals()
         terminated = self._finished()
         truncated = not terminated and self.time >= self.config.max_time
-        self.done = terminated or truncated
+        self.done, self.truncated = terminated or truncated, truncated
         return self.observation(), reward, terminated, truncated, self._info()
 
     # -- State -----------------------------------------------------------------------
