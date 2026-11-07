@@ -35,10 +35,53 @@ Each module has its own test file (`tests/test_deeprm_*.py`).
 | Demands | random dominant resource | job types with correlated per-resource ranges |
 | Load | sweep ~10%–190% | same, defined on the bottleneck resource |
 | Cluster state | built into the env | behind a swappable `ClusterBackend` |
+| Clock | one timestep per void/invalid action | jump to the next arrival or completion |
+| Backlog | bounded, overflow dropped | unbounded; observation count saturates |
 
-Everything else follows the paper: M visible job slots, a backlog count, the
-`{void, 1..M}` actions, time frozen while valid jobs are scheduled, reward
-`−Σ 1/duration` per timestep, and REINFORCE with a time-dependent baseline.
+The environment retains M visible job slots, a backlog count, the `{void, 1..M}`
+actions, time frozen while valid jobs are scheduled, and the slowdown objective.
+Training uses REINFORCE with a per-decision baseline.
+
+## Event-driven simulator
+
+`reset(jobs)` inserts arrivals into a time-ordered heap, clears the cluster, and
+processes arrivals at time zero. Jobs with the same arrival time enter the queue
+in job-ID order. A successful scheduling action starts the selected job now,
+refills its visible slot from the FIFO backlog, and inserts its completion event
+at `now + duration`. It returns zero reward without advancing the clock.
+
+NOP (action 0), an empty slot, or a job that cannot fit advances directly to the
+next event, capped at `max_time`. The backend shifts its occupancy window by the
+elapsed time and releases completed allocations. The environment processes all
+events at that timestamp, completions before arrivals, before returning an
+observation. There are no intermediate scheduling decisions during the jump.
+
+The reward is `−Δt × Σ(1 / duration)` over jobs running or waiting **before** the
+jump. New arrivals are charged only from their arrival time onward. With
+`gamma = 1`, the return of a completed episode is exactly negative total slowdown.
+Training's optional discount `gamma < 1` remains per decision, not per time unit.
+
+The episode terminates when all jobs finish. If the next event is beyond
+`max_time`, it advances only to that limit and truncates. Completions exactly at
+the limit are processed first, so an otherwise finished episode terminates
+normally. If a policy chooses NOP with jobs waiting and no future events, it
+advances to `max_time`, charges the remaining waiting time, and truncates.
+
+`backlog_size` controls only the number of backlog observation cells. The count
+saturates at that size, but every waiting job is retained. `info["backlog"]` gives
+the actual length; the existing `dropped` report field remains zero.
+
+For example, on a two-CPU cluster, start A at time zero, wait for B at time 1,
+then wait for A's completion and C's arrival at time 3. Start B and C together:
+
+| Job | Arrival | CPU | Duration | Start | Finish | Slowdown |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| A | 0 | 2 | 3 | 0 | 3 | 1 |
+| B | 1 | 1 | 2 | 3 | 5 | 2 |
+| C | 3 | 1 | 1 | 3 | 4 | 1 |
+
+The clock visits `0 → 1 → 3 → 4 → 5`, and total reward is `−4`.
+`test_hand_calculated_event_schedule_and_rewards` verifies this schedule.
 
 ## Defaults chosen during implementation (please review)
 
@@ -134,21 +177,29 @@ Heuristics never withhold, by construction.
 | `reset()` | empty cluster at time 0 |
 | `available()` | free units, shape `(T, n_resources)`; row 0 is now |
 | `allocate(job, now)` | start the job now if it fits for its whole duration, else return `False` |
-| `advance()` | move one timestep; return `(job, start, finish)` for jobs that finished |
+| `advance_to(now)` | move to the target time, release jobs finished by then, and shift the resource window; return `None` |
 | `running()` | jobs holding resources |
 
 `fits()` and `canvas()` have default implementations built on `available()`,
 so a backend wrapping the allocator or Slurm does not need any image code. Pass
 it as `DeepRMEnv(spec, config, backend=MyBackend(spec, T))`. Its `spec` and
-horizon must match the environment's.
+horizon must match the environment's. The environment owns arrival/completion
+events and finish records; the backend owns resource availability and running
+allocations. Custom backends must implement `advance_to(now)` instead of the old
+single-step `advance()` method.
 
 ## Caveats
 
 - One pooled cluster with no machine boundaries, as in the paper. The
   node-aware simulator in `docs/simulator.md` would be a separate test of how
   well results carry over.
-- Jobs that arrive to a full backlog (60) are dropped, as in the original. They
-  contribute no reward and are reported as `dropped`.
+- Backlog observation counts saturate (60 by default), even though jobs are never
+  dropped. The policy cannot distinguish larger backlogs from that encoding alone.
+- Job durations remain known, positive whole time units bounded by the lookahead.
+  Jobs start immediately; future reservations and preemption are not implemented.
+- Checkpoints trained with timestep advancement remain shape-compatible, but the
+  decision timing and backlog semantics have changed. Retrain for comparisons
+  under the event-driven environment.
 - Truncated episodes count unfinished jobs at their slowdown so far, which is a
   lower bound.
 - The paper's "Tetris\*" knob is not fully specified. The weighting above is our

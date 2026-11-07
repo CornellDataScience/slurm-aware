@@ -1,7 +1,7 @@
 """Cluster backends: who tracks allocations, availability and completions for the env.
 
 The environment only talks to `ClusterBackend`. `InProcessBackend` is the pooled,
-timestep-grid model from the original paper and is what training uses. A real
+resource-grid model advanced to event times, and is what training uses. A real
 backend (e.g. the systems team's allocator or Slurm) implements the same five
 methods; it needs no image code, since `canvas` has a default built from
 `available`.
@@ -39,8 +39,11 @@ class ClusterBackend(ABC):
         """Start `job` at `now` if its demand fits for its whole duration; False if not."""
 
     @abstractmethod
-    def advance(self) -> list[tuple[Job, int, int]]:
-        """Move one timestep forward; return (job, start, finish) for jobs that finished."""
+    def advance_to(self, now: int) -> None:
+        """Move to `now`, releasing jobs finished by then and shifting the resource window.
+
+        The environment owns completion events and records their finish times.
+        """
 
     @abstractmethod
     def running(self) -> list[Job]:
@@ -104,18 +107,22 @@ class InProcessBackend(ClusterBackend):
         self._next_shade += 1
         return True
 
-    def advance(self) -> list[tuple[Job, int, int]]:
-        self.now += 1
-        self._free = np.vstack([self._free[1:], np.array(self.spec.capacities)[None, :]])
+    def advance_to(self, now: int) -> None:
+        if now < self.now:
+            raise ValueError("Cannot advance the backend backward in time.")
+        shift = min(now - self.now, self.horizon)
+        self.now = now
+        self._free = np.vstack([
+            self._free[shift:], np.tile(np.array(self.spec.capacities), (shift, 1))
+        ])
         for r, owner in enumerate(self._owner):
-            self._owner[r] = np.hstack([owner[:, 1:], np.zeros((owner.shape[0], 1), np.int64)])
-        finished = []
+            self._owner[r] = np.hstack([
+                owner[:, shift:], np.zeros((owner.shape[0], shift), np.int64)
+            ])
         for job_id, (job, start) in list(self._running.items()):
             if start + job.duration <= self.now:
-                finished.append((job, start, start + job.duration))
                 del self._running[job_id]
                 del self._shade_of[job_id]
-        return finished
 
     def running(self) -> list[Job]:
         return [job for job, _ in self._running.values()]
