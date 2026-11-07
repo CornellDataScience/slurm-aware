@@ -37,8 +37,13 @@ from typing import Mapping, Sequence
 import numpy as np
 import torch
 
-from slurm_aware.deeprm.baselines import SJF
-from slurm_aware.deeprm.env import DeepRMEnv, EnvConfig, run_episode
+from slurm_aware.deeprm.baselines import FIFO, SJF
+from slurm_aware.deeprm.env import (
+    DeepRMEnv,
+    EnvConfig,
+    run_episode,
+    summarize_scheduling_metrics,
+)
 from slurm_aware.deeprm.generator import GeneratorConfig, JobTraceGenerator, jobset_seed
 from slurm_aware.deeprm.jobs import Job
 from slurm_aware.deeprm.policy import NetworkPolicy, PolicyNetwork, sample_actions
@@ -144,6 +149,7 @@ def collect_episodes(
         slowdowns = env.slowdowns(include_unfinished=True)
         episode["mean_slowdown"] = float(np.mean(slowdowns)) if slowdowns else 0.0
         episode["truncated"] = env.truncated
+        episode.update(env.scheduling_metrics())
     return episodes
 
 
@@ -177,6 +183,11 @@ def accumulate_gradient(
         "mean_decisions": len(observations) / len(episodes),
         "entropy_sum": entropy,
         "truncated": sum(e["truncated"] for e in episodes),
+        "wait_times": [wait for e in episodes for wait in e.get("wait_times", [])],
+        "resource_usage": np.sum(
+            [e["resource_usage"] for e in episodes if "resource_usage" in e], axis=0
+        ).tolist(),
+        "timesteps": sum(e.get("timesteps", 0) for e in episodes),
     }
 
 
@@ -303,6 +314,13 @@ LOG_FIELDS = (
     "val_slowdown",
     "iteration_seconds",
     "elapsed_seconds",
+    "p95_wait",
+    "p99_wait",
+    "resource_utilization",
+    "fifo_val_slowdown",
+    "fifo_val_p95_wait",
+    "fifo_val_p99_wait",
+    "fifo_val_resource_utilization",
 )
 
 
@@ -336,13 +354,43 @@ def train(
     val_sets = build_jobsets(cfg, "val", cfg.val_jobsets)
     if not train_sets or not val_sets:
         raise ValueError("Need at least one training and one validation jobset.")
-    sjf_val = float(
-        np.mean([s for js in val_sets for s in run_episode(env, SJF(), js)["slowdowns"]])
-    )
-    log(f"Validation reference: SJF mean slowdown {sjf_val:.3f}")
+    references = {}
+    for policy in (SJF(), FIFO()):
+        episodes = [run_episode(env, policy, js) for js in val_sets]
+        slowdowns = [s for episode in episodes for s in episode["slowdowns"]]
+        reference = {
+            "mean_slowdown": float(np.mean(slowdowns)) if slowdowns else 0.0,
+            **summarize_scheduling_metrics(episodes, env.spec),
+            "truncated_episodes": sum(e["truncated"] for e in episodes),
+        }
+        references[policy.name] = reference
+        utilization = " ".join(
+            f"{r}={u:.1%}" for r, u in reference["resource_utilization"].items()
+        )
+        log(
+            f"Validation reference: {policy.name.upper()} "
+            f"mean slowdown {reference['mean_slowdown']:.3f} "
+            f"| wait p95 {reference['p95_wait']:.2f} p99 {reference['p99_wait']:.2f} "
+            f"| util {utilization} | truncated {reference['truncated_episodes']}"
+        )
+    sjf_val = references["sjf"]["mean_slowdown"]
+    fifo_val = references["fifo"]
 
     log_path = output / "train_log.csv"
     new_log = not (state and log_path.exists())
+    if not new_log:
+        # Upgrade older logs before appending rows with the new metric columns.
+        with log_path.open(newline="") as stream:
+            reader = csv.DictReader(stream)
+            old_fields = reader.fieldnames
+            old_rows = list(reader) if old_fields != list(LOG_FIELDS) else None
+        if old_rows is not None:
+            temporary = log_path.with_suffix(".tmp")
+            with temporary.open("w", newline="") as stream:
+                writer = csv.DictWriter(stream, fieldnames=LOG_FIELDS)
+                writer.writeheader()
+                writer.writerows(old_rows)
+            temporary.replace(log_path)
     last_iteration = start - 1
     with RolloutRunner(cfg, train_sets) as runner, log_path.open(
         "w" if new_log else "a", newline=""
@@ -360,6 +408,7 @@ def train(
             seconds = time.monotonic() - began
             elapsed += seconds
             last_iteration = iteration
+            metrics = summarize_scheduling_metrics(stats, env.spec)
 
             row = {
                 "iteration": iteration,
@@ -372,6 +421,13 @@ def train(
                 "val_slowdown": "",
                 "iteration_seconds": seconds,
                 "elapsed_seconds": elapsed,
+                "p95_wait": metrics["p95_wait"],
+                "p99_wait": metrics["p99_wait"],
+                "resource_utilization": json.dumps(metrics["resource_utilization"]),
+                "fifo_val_slowdown": fifo_val["mean_slowdown"],
+                "fifo_val_p95_wait": fifo_val["p95_wait"],
+                "fifo_val_p99_wait": fifo_val["p99_wait"],
+                "fifo_val_resource_utilization": json.dumps(fifo_val["resource_utilization"]),
             }
             last = iteration == cfg.iterations - 1
             is_best = False
@@ -384,9 +440,13 @@ def train(
             log(
                 f"iter {iteration:4d} | return {row['mean_return']:9.2f} "
                 f"slowdown {row['mean_slowdown']:6.3f} entropy {row['mean_entropy']:.3f} "
-                f"| {seconds:5.2f}s"
+                f"| wait p95 {row['p95_wait']:.2f} p99 {row['p99_wait']:.2f} "
+                "| util "
+                + " ".join(f"{r}={u:.1%}" for r, u in metrics["resource_utilization"].items())
+                + f" | {seconds:5.2f}s"
                 + (
-                    f" | val slowdown {row['val_slowdown']:.3f} (SJF {sjf_val:.3f})"
+                    f" | val slowdown {row['val_slowdown']:.3f} "
+                    f"(SJF {sjf_val:.3f}, FIFO {fifo_val['mean_slowdown']:.3f})"
                     + (" new best" if is_best else "")
                     if row["val_slowdown"] != ""
                     else ""
@@ -402,6 +462,7 @@ def train(
                     "iteration": iteration,
                     "best_val_slowdown": best,
                     "sjf_val_slowdown": sjf_val,
+                    "fifo_val_metrics": fifo_val,
                     "elapsed": elapsed,
                 }
                 if (iteration + 1) % cfg.checkpoint_every == 0 or last:
@@ -411,6 +472,7 @@ def train(
     return {
         "best_val_slowdown": best,
         "sjf_val_slowdown": sjf_val,
+        "fifo_val_metrics": fifo_val,
         "iterations": last_iteration + 1,
         "output": str(output),
     }

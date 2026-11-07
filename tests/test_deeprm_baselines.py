@@ -3,6 +3,7 @@ import pytest
 np = pytest.importorskip("numpy")
 
 from slurm_aware.deeprm.baselines import (  # noqa: E402
+    FIFO,
     SJF,
     Packer,
     RandomFit,
@@ -36,6 +37,33 @@ def test_sjf_picks_shortest_fitting_job():
     env = env_with(jobs, running=[blocker])
     assert env.slots.index(jobs[1]) + 1 not in env.fitting_slots()  # needs all 10 CPUs
     assert SJF()(env) == env.slots.index(jobs[2]) + 1
+
+
+def test_fifo_keeps_arrival_order_after_slot_refill():
+    jobs = [Job(i, 0, 1, (1, 0, 0)) for i in range(4)]
+    env = env_with(jobs)
+    policy = FIFO()
+    assert policy(env) == 1
+    env.step(1)  # Newer job 3 fills slot 1 ahead of older jobs in slots 2 and 3.
+    assert env.slots[0].job_id == 3
+    assert policy(env) == 2
+    env.step(2)
+    assert policy(env) == 3
+    env.step(3)
+    assert policy(env) == 1
+    env.step(1)
+    assert policy(env) == VOID  # No visible waiting jobs.
+
+
+def test_fifo_waits_for_oldest_job_even_if_younger_job_fits():
+    jobs = [Job(1, 0, 4, (10, 0, 0)), Job(2, 0, 1, (1, 0, 0))]
+    env = env_with(jobs, running=[Job(0, 0, 6, (1, 0, 0))])
+    assert SJF()(env) != VOID
+    assert FIFO()(env) == VOID
+    env.step(VOID)
+    assert env.time == 6
+    assert env.slots[FIFO()(env) - 1] == jobs[0]
+    assert isinstance(heuristics()["fifo"], FIFO)
 
 
 def test_packer_prefers_job_aligned_with_free_resources():

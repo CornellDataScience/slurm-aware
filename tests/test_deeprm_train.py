@@ -1,4 +1,5 @@
 import csv
+import json
 
 import pytest
 
@@ -92,21 +93,56 @@ def test_parallel_and_serial_gradients_match(tmp_path):
         g0, n0, s0 = serial.gradient(state, iteration=5)
     with RolloutRunner(TrainConfig(**{**cfg.__dict__, "workers": 2}), jobsets) as parallel:
         g1, n1, s1 = parallel.gradient(state, iteration=5)
-    assert n0 == n1 and s0 == s1
+    assert n0 == n1
+    for serial_stats, parallel_stats in zip(s0, s1):
+        # Workers use one torch thread; entropy can differ by float32 rounding.
+        assert serial_stats["entropy_sum"] == pytest.approx(parallel_stats["entropy_sum"])
+        assert {k: v for k, v in serial_stats.items() if k != "entropy_sum"} == {
+            k: v for k, v in parallel_stats.items() if k != "entropy_sum"
+        }
     assert all(np.allclose(a, b, atol=1e-5) for a, b in zip(g0, g1))
 
 
 def test_train_logs_checkpoints_and_resumes(tmp_path):
     cfg = small_cfg(tmp_path)
-    result = train(cfg, log=lambda *_: None)
+    messages = []
+    result = train(cfg, log=messages.append)
+    assert any("wait p95" in message and "p99" in message and "cpu=" in message
+               for message in messages)
+    assert any("Validation reference: FIFO" in message and "wait p95" in message
+               and "p99" in message and "cpu=" in message for message in messages)
+    fifo_metrics = result["fifo_val_metrics"]
+    assert fifo_metrics["p99_wait"] >= fifo_metrics["p95_wait"] >= 0
+    assert all(0 <= u <= 1 for u in fifo_metrics["resource_utilization"].values())
     assert result["iterations"] == 3
     out = tmp_path / "run"
     state = load_checkpoint(out / "latest.pt")
     assert state["iteration"] == 2 and (out / "best.pt").exists()
+    assert state["fifo_val_metrics"] == fifo_metrics
+    # Simulate a checkpoint/log produced before the new metrics existed.
+    with (out / "train_log.csv").open(newline="") as stream:
+        reader = csv.DictReader(stream)
+        old_fields = [f for f in reader.fieldnames
+                      if f not in ("p95_wait", "p99_wait", "resource_utilization")
+                      and not f.startswith("fifo_val_")]
+        old_rows = list(reader)
+    with (out / "train_log.csv").open("w", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=old_fields, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(old_rows)
     train(small_cfg(tmp_path, iterations=5), resume=out / "latest.pt", log=lambda *_: None)
     rows = list(csv.DictReader((out / "train_log.csv").open()))
     assert [int(r["iteration"]) for r in rows] == [0, 1, 2, 3, 4]
     assert all(float(r["mean_slowdown"]) >= 1 for r in rows)
+    assert rows[0]["p95_wait"] == ""  # Unknown historical metrics stay blank.
+    assert float(rows[-1]["p99_wait"]) >= float(rows[-1]["p95_wait"]) >= 0
+    assert all(0 <= u <= 1 for u in json.loads(rows[-1]["resource_utilization"]).values())
+    assert float(rows[-1]["fifo_val_slowdown"]) == fifo_metrics["mean_slowdown"]
+    assert float(rows[-1]["fifo_val_p95_wait"]) == fifo_metrics["p95_wait"]
+    assert float(rows[-1]["fifo_val_p99_wait"]) == fifo_metrics["p99_wait"]
+    assert json.loads(rows[-1]["fifo_val_resource_utilization"]) == (
+        fifo_metrics["resource_utilization"]
+    )
     network, restored = network_from_checkpoint(load_checkpoint(out / "latest.pt"))
     assert restored.num_slots == 3 and restored.hidden_sizes == (20,)
     env = DeepRMEnv(SMALL_GEN.cluster, EnvConfig(3, 6, 6, 80))

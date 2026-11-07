@@ -3,12 +3,60 @@ import pytest
 np = pytest.importorskip("numpy")
 
 from slurm_aware.deeprm.backend import ClusterBackend, InProcessBackend  # noqa: E402
-from slurm_aware.deeprm.env import VOID, DeepRMEnv, EnvConfig  # noqa: E402
+from slurm_aware.deeprm.env import (  # noqa: E402
+    VOID,
+    DeepRMEnv,
+    EnvConfig,
+    run_episode,
+    summarize_scheduling_metrics,
+)
 from slurm_aware.deeprm.generator import JobTraceGenerator  # noqa: E402
 from slurm_aware.deeprm.jobs import ClusterSpec, Job  # noqa: E402
 
 SPEC = ClusterSpec(("cpu", "gpu", "mem"), (4, 2, 4))
 SMALL = EnvConfig(num_slots=2, backlog_size=2, lookahead=5, max_time=100)
+
+
+def test_wait_percentiles_and_time_weighted_utilization():
+    spec = ClusterSpec(("cpu", "gpu"), (2, 1))
+    env = DeepRMEnv(spec, EnvConfig(num_slots=2, lookahead=5))
+    # Idle until t=1; the second job waits 4 timesteps for the first.
+    jobs = [Job(0, 1, 4, (2, 1)), Job(1, 1, 2, (2, 0))]
+    def policy(env):
+        return next(iter(env.fitting_slots()), VOID)
+
+    first = run_episode(env, policy, jobs)
+    assert first["wait_times"] == [0, 4]
+    assert first["resource_usage"] == [12, 4]
+    metrics = summarize_scheduling_metrics([first], spec)
+    assert metrics["p95_wait"] == pytest.approx(3.8)
+    assert metrics["p99_wait"] == pytest.approx(3.96)
+    assert metrics["resource_utilization"] == pytest.approx({"cpu": 6 / 7, "gpu": 4 / 7})
+    second = run_episode(env, policy, [Job(0, 0, 1, (1, 0))])
+    pooled = summarize_scheduling_metrics([first, second], spec)
+    assert pooled["p95_wait"] == pytest.approx(3.6)
+    assert pooled["resource_utilization"] == pytest.approx({"cpu": 13 / 16, "gpu": 0.5})
+
+
+def test_metrics_at_truncation_exclude_future_jobs_and_clip_runtime():
+    spec = ClusterSpec(("cpu",), (2,))
+    env = DeepRMEnv(spec, EnvConfig(num_slots=2, lookahead=5, max_time=3))
+    env.reset([Job(0, 0, 5, (2,)), Job(1, 1, 1, (1,)), Job(2, 8, 1, (1,))])
+    env.step(1)
+    while not env.done:
+        env.step(VOID)
+    sample = env.scheduling_metrics()
+    assert sample["wait_times"] == [0, 2]
+    assert sample["resource_usage"] == [6]
+    assert summarize_scheduling_metrics([sample], spec)["resource_utilization"] == {"cpu": 1.0}
+
+
+def test_empty_episode_metrics():
+    env = DeepRMEnv(SPEC, SMALL)
+    sample = run_episode(env, lambda env: VOID, [])
+    metrics = summarize_scheduling_metrics([sample], SPEC)
+    assert metrics["p95_wait"] == metrics["p99_wait"] == 0
+    assert metrics["resource_utilization"] == dict.fromkeys(SPEC.resources, 0.0)
 
 
 def test_backend_fixed_allocation_and_completion():

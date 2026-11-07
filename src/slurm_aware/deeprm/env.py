@@ -191,6 +191,25 @@ class DeepRMEnv:
                 values.append((self.time - record.job.arrival) / record.job.duration)
         return values
 
+    def scheduling_metrics(self) -> dict:
+        """Wait samples and resource-unit time over [0, time], including partial runs.
+
+        Unstarted, arrived jobs contribute their wait so far (a lower bound).
+        Jobs that have not arrived are excluded. Running jobs contribute only
+        the resource time actually used before the episode ends.
+        """
+        waits = []
+        usage = np.zeros(self.spec.n_resources)
+        for record in self.records.values():
+            if record.job.arrival > self.time:
+                continue
+            start = record.start
+            waits.append((self.time if start is None else start) - record.job.arrival)
+            if start is not None:
+                runtime = max(0, min(record.job.duration, self.time - start))
+                usage += np.asarray(record.job.demand) * runtime
+        return {"wait_times": waits, "resource_usage": usage.tolist(), "timesteps": self.time}
+
     # -- Internals -------------------------------------------------------------------
 
     def _push_event(self, time: int, kind: int, job_id: int) -> None:
@@ -252,4 +271,22 @@ def run_episode(env: DeepRMEnv, policy: Policy, jobs: Sequence[Job] | None = Non
         "slowdowns": slowdowns,
         "unfinished": sum(r.finish is None for r in env.records.values()),
         "dropped": len(env.dropped),
+        **env.scheduling_metrics(),
+    }
+
+
+def summarize_scheduling_metrics(samples: Sequence[dict], spec: ClusterSpec) -> dict:
+    """Pool job waits and weight resource utilization by episode duration."""
+    waits = [wait for sample in samples for wait in sample["wait_times"]]
+    timesteps = sum(sample["timesteps"] for sample in samples)
+    usage = np.zeros(spec.n_resources)
+    for sample in samples:
+        usage += sample["resource_usage"]
+    return {
+        "p95_wait": float(np.percentile(waits, 95)) if waits else 0.0,
+        "p99_wait": float(np.percentile(waits, 99)) if waits else 0.0,
+        "resource_utilization": {
+            resource: float(used / (capacity * timesteps)) if timesteps else 0.0
+            for resource, capacity, used in zip(spec.resources, spec.capacities, usage)
+        },
     }

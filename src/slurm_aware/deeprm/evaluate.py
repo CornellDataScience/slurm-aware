@@ -1,4 +1,4 @@
-"""Evaluate a trained DeepRM policy against SJF, Packer, Tetris* and random on held-out jobsets.
+"""Evaluate DeepRM against FIFO, SJF, Packer, Tetris* and random on held-out jobsets.
 
 Reports, for test jobsets regenerated from the checkpoint's generator config:
 
@@ -25,7 +25,7 @@ from typing import Mapping, Sequence
 import numpy as np
 
 from slurm_aware.deeprm.baselines import heuristics
-from slurm_aware.deeprm.env import Policy, run_episode
+from slurm_aware.deeprm.env import Policy, run_episode, summarize_scheduling_metrics
 from slurm_aware.deeprm.generator import REGIMES, GeneratorConfig, JobTraceGenerator
 from slurm_aware.deeprm.policy import NetworkPolicy
 from slurm_aware.deeprm.train import (
@@ -37,17 +37,19 @@ from slurm_aware.deeprm.train import (
 
 DEFAULT_LOADS = tuple(round(0.1 + 0.2 * i, 1) for i in range(10))  # 10% .. 190%
 SIZE_BUCKETS = ("small", "medium", "large")
-# Fixed series order -> fixed colors (reference palette slots 1-5, light mode).
+# Fixed policy colors across comparison plots.
 SERIES_COLORS = {
     "deeprm": "#2a78d6",
     "sjf": "#eb6834",
+    "fifo": "#8856a7",
     "packer": "#1baf7a",
     "tetris": "#eda100",
     "random": "#e87ba4",
 }
-SERIES_MARKERS = {"deeprm": "o", "sjf": "s", "packer": "^", "tetris": "D", "random": "v"}
+SERIES_MARKERS = {"deeprm": "o", "sjf": "s", "fifo": "P", "packer": "^", "tetris": "D",
+                  "random": "v"}
 LABELS = {"deeprm": "DeepRM", "sjf": "SJF", "packer": "Packer", "tetris": "Tetris*",
-          "random": "Random"}
+          "random": "Random", "fifo": "FIFO"}
 
 
 def job_footprint(duration: int, demand: Sequence[int], capacities: Sequence[int]) -> float:
@@ -70,6 +72,8 @@ def evaluate_load(
             episodes.append({k: v for k, v in result.items() if k != "slowdowns"})
             for record in env.records.values():
                 job = record.job
+                if job.arrival > env.time:
+                    continue
                 finish = record.finish if record.finish is not None else env.time
                 jobs.append({
                     "duration": job.duration,
@@ -91,6 +95,7 @@ def evaluate_load(
                     ]
         slowdowns = [j["slowdown"] for j in jobs]
         out[name] = {
+            **summarize_scheduling_metrics(episodes, env.spec),
             "mean_slowdown": float(np.mean(slowdowns)) if slowdowns else 0.0,
             "mean_wait": float(np.mean([j["wait"] for j in jobs])) if jobs else 0.0,
             "jobs": len(jobs),
@@ -278,6 +283,24 @@ def render(report: Mapping) -> str:
         row = report["by_load"][str(x)]
         lines.append(f"| {x:.0%} | " + " | ".join(f"{row[n]['mean_slowdown']:.3f}"
                                                    for n in names) + " |")
+    for metric, title in (("p95_wait", "p95 wait time (timesteps)"),
+                          ("p99_wait", "p99 wait time (timesteps)")):
+        lines += ["", f"## {title}", "", header, rule]
+        for x in loads:
+            row = report["by_load"][str(x)]
+            lines.append(f"| {x:.0%} | " + " | ".join(f"{row[n][metric]:.2f}"
+                                                       for n in names) + " |")
+    resources = report["by_load"][str(loads[0])][names[0]]["resource_utilization"]
+    for resource in resources:
+        lines += ["", f"## {resource} utilization", "", header, rule]
+        for x in loads:
+            row = report["by_load"][str(x)]
+            lines.append(f"| {x:.0%} | " + " | ".join(
+                f"{row[n]['resource_utilization'][resource]:.1%}" for n in names
+            ) + " |")
+    lines += ["", "Wait percentiles pool all arrived jobs; unstarted jobs contribute their "
+              "wait so far (a lower bound). Utilization is resource-unit time divided by "
+              "capacity times elapsed episode time, including initial idle time and draining."]
     lines += ["", "## Withhold rate (time advanced while a visible job fit)", "", header, rule]
     for x in loads:
         row = report["by_load"][str(x)]

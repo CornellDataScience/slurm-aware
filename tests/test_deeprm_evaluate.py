@@ -61,8 +61,16 @@ def test_end_to_end_report(tmp_path, capsys):
     assert main(args) == 0
     report = json.loads((out / "evaluation.json").read_text())
     assert report["regime"] == "bursty" and report["analysis_load"] == 0.5
-    assert set(report["by_load"]["1.5"]) == {"deeprm", "sjf", "packer", "tetris", "random"}
+    assert set(report["by_load"]["1.5"]) == {
+        "deeprm", "fifo", "sjf", "packer", "tetris", "random"}
     assert report["training"]["iterations"] == 2
+    for metrics in report["by_load"]["1.5"].values():
+        assert metrics["p99_wait"] >= metrics["p95_wait"] >= 0
+        assert all(0 <= u <= 1 for u in metrics["resource_utilization"].values())
     assert {p.name for p in out.glob("*.png")} == {
         "slowdown_vs_load.png", "slowdown_by_size.png", "training_curve.png"}
     assert "Withhold rate" in (out / "evaluation.md").read_text()
+    printed = capsys.readouterr().out
+    assert "p95 wait time" in printed and "p99 wait time" in printed
+    assert "cpu utilization" in printed and "gpu utilization" in printed
+    assert "FIFO" in printed

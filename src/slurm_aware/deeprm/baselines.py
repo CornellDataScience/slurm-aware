@@ -1,8 +1,9 @@
-"""Heuristic schedulers from the DeepRM paper, as env policies (`policy(env) -> action`).
+"""FIFO and DeepRM heuristic schedulers, as env policies (`policy(env) -> action`).
 
 Each sees exactly what the agent sees: the M visible job slots, not the backlog.
-Among slot jobs that fit now (for their whole duration), it returns the best
-scoring slot, or void when none fits; time stays frozen while jobs keep fitting,
+FIFO waits for the oldest visible job to fit, without backfilling younger jobs.
+The scored heuristics consider slot jobs that fit now (for their whole duration)
+and return the best scoring slot, or void when none fits; time stays frozen while jobs fit,
 so repeated calls fill the cluster greedily within a timestep, as in the paper.
 
 Packer's alignment uses demand and current free capacity as fractions of each
@@ -52,6 +53,20 @@ class SJF(_ScoredHeuristic):
         return sjf_score(job)
 
 
+class FIFO:
+    """Oldest visible job first, ordered by (arrival, job_id), without backfilling."""
+
+    name = "fifo"
+
+    def __call__(self, env: DeepRMEnv) -> int:
+        waiting = [a for a, job in enumerate(env.slots, start=1) if job is not None]
+        if not waiting:
+            return VOID
+        action = min(waiting, key=lambda a: (env.slots[a - 1].arrival,
+                                             env.slots[a - 1].job_id))
+        return action if env.backend.fits(env.slots[action - 1]) else VOID
+
+
 class Packer(_ScoredHeuristic):
     """Best alignment between job demand and currently available resources."""
 
@@ -92,6 +107,7 @@ class RandomFit:
 def heuristics(seed: int = 0, tetris_weight: float = 0.5) -> dict:
     return {
         "sjf": SJF(),
+        "fifo": FIFO(),
         "packer": Packer(),
         "tetris": TetrisStar(tetris_weight),
         "random": RandomFit(seed),
