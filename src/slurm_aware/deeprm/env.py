@@ -3,18 +3,21 @@
 State: one image per resource for the cluster (rows = units, columns = the next T
 timesteps, cells shaded by the occupying job), one image per resource for each of
 the first M waiting jobs (its demand over its duration), and a backlog count
-encoded as `backlog_size` cells with the first `len(backlog)` set to 1. All of it is
+encoded as `backlog_size` cells, saturating when the queue exceeds that size.
+The backlog itself is unbounded; no jobs are dropped. All observations are
 flattened into one float32 vector.
 
 Actions: 0 = void (NOP); 1..M = schedule the job in that slot. A valid schedule
-returns reward 0 and freezes time, so several jobs can start in one timestep. Void,
-an empty slot or a job that does not fit all advance time by one step.
+returns reward 0 and freezes time, so several jobs can start at one timestamp.
+Void, an empty slot or a job that does not fit advances to the next arrival or
+completion (capped at max_time). All events at that time are processed together,
+with completions before arrivals. If no events remain but jobs are waiting,
+NOP advances to max_time and truncates the episode.
 
-Reward on a time-advancing step: -sum(1 / duration) over every job in the system
-(running, in a slot, or backlogged) during the timestep being left. A job then
+Reward on a time-advancing step: -elapsed * sum(1 / duration) over every job in
+the system (running, in a slot, or backlogged) during the interval being left. A job then
 contributes exactly (finish - arrival) / duration over its life, so with gamma = 1
-the episode return is minus the total slowdown of admitted jobs. Jobs arriving to
-a full backlog are dropped (as in the original) and contribute nothing.
+the episode return is minus the total slowdown of all jobs in a completed episode.
 
 The episode terminates once all arrivals have happened and the system is empty,
 and is truncated at `max_time` timesteps.
@@ -24,6 +27,8 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
+from heapq import heappop, heappush
+from itertools import count
 from typing import Callable, Sequence
 
 import numpy as np
@@ -32,13 +37,14 @@ from slurm_aware.deeprm.backend import ClusterBackend, InProcessBackend
 from slurm_aware.deeprm.jobs import ClusterSpec, Job, check_jobset
 
 VOID = 0
+_COMPLETION, _ARRIVAL = 0, 1  # completions sort before arrivals at the same time
 Policy = Callable[["DeepRMEnv"], int]  # any scheduler: observe the env, return an action
 
 
 @dataclass(frozen=True)
 class EnvConfig:
     num_slots: int = 10  # M
-    backlog_size: int = 60
+    backlog_size: int = 60  # observation cells, not a queue capacity
     lookahead: int = 20  # T: image width, and the longest placeable job
     max_time: int = 500  # truncation cap in timesteps (arrivals end at the generator horizon)
 
@@ -97,8 +103,11 @@ class DeepRMEnv:
         self.records = {job.job_id: JobRecord(job) for job in self.jobs}
         self.dropped: list[Job] = []
         self.decisions: list[dict] = []
-        self._next_arrival = 0
-        self._enqueue_arrivals()
+        self._events: list[tuple[int, int, int, int]] = []
+        self._event_sequence = count()
+        for job in self.jobs:
+            self._push_event(job.arrival, _ARRIVAL, job.job_id)
+        self._process_events()
         self.done = self._finished()
         self.truncated = False
         return self.observation(), self._info()
@@ -111,6 +120,7 @@ class DeepRMEnv:
         job = self.slots[action - 1] if action != VOID else None
         if job is not None and self.backend.allocate(job, self.time):
             self.records[job.job_id].start = self.time
+            self._push_event(self.time + job.duration, _COMPLETION, job.job_id)
             self.slots[action - 1] = self.backlog.popleft() if self.backlog else None
             if self.track_decisions:
                 self._log_decision(action, scheduled=job)
@@ -118,11 +128,15 @@ class DeepRMEnv:
 
         if self.track_decisions:
             self._log_decision(action, scheduled=None)
-        reward = -sum(1.0 / j.duration for j in self.jobs_in_system())
-        for finished, _start, finish in self.backend.advance():
-            self.records[finished.job_id].finish = finish
-        self.time += 1
-        self._enqueue_arrivals()
+        next_time = min(
+            self._events[0][0] if self._events else self.config.max_time,
+            self.config.max_time,
+        )
+        elapsed = next_time - self.time
+        reward = -elapsed * sum(1.0 / j.duration for j in self.jobs_in_system())
+        self.backend.advance_to(next_time)
+        self.time = next_time
+        self._process_events()
         terminated = self._finished()
         truncated = not terminated and self.time >= self.config.max_time
         self.done, self.truncated = terminated or truncated, truncated
@@ -179,23 +193,22 @@ class DeepRMEnv:
 
     # -- Internals -------------------------------------------------------------------
 
-    def _enqueue_arrivals(self) -> None:
-        while (
-            self._next_arrival < len(self.jobs)
-            and self.jobs[self._next_arrival].arrival <= self.time
-        ):
-            job = self.jobs[self._next_arrival]
-            self._next_arrival += 1
-            if None in self.slots:
-                self.slots[self.slots.index(None)] = job
-            elif len(self.backlog) < self.config.backlog_size:
-                self.backlog.append(job)
+    def _push_event(self, time: int, kind: int, job_id: int) -> None:
+        heappush(self._events, (time, kind, next(self._event_sequence), job_id))
+
+    def _process_events(self) -> None:
+        while self._events and self._events[0][0] == self.time:
+            time, kind, _, job_id = heappop(self._events)
+            record = self.records[job_id]
+            if kind == _COMPLETION:
+                record.finish = time
+            elif None in self.slots:
+                self.slots[self.slots.index(None)] = record.job
             else:
-                self.dropped.append(job)
-                del self.records[job.job_id]
+                self.backlog.append(record.job)
 
     def _finished(self) -> bool:
-        return self._next_arrival == len(self.jobs) and not self.jobs_in_system()
+        return not self._events and not self.jobs_in_system()
 
     def _log_decision(self, action: int, scheduled: Job | None) -> None:
         fitting = self.fitting_slots() if scheduled is None else []
