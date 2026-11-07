@@ -156,6 +156,37 @@ def test_persistent_service_reservations_reduce_available_capacity_not_objective
         simulate([replace(jobs[0], gpus_per_node=2)], FIFO, config)
 
 
+def test_simultaneous_completions_restore_resources_before_arrival_dispatch():
+    config = SimulationConfig(
+        cluster=Cluster(
+            node_specs=(Node("worker", 4, 100, 2, reserved_cpus=1, reserved_memory_mb=20),)
+        ),
+        qos_priorities={"normal": 0, "urgent": 1},
+    )
+    jobs = [
+        Job("a", 0, 5, 5, memory_mb_per_node=40, gpus_per_node=1),
+        Job("b", 0, 5, 5, memory_mb_per_node=40, gpus_per_node=1),
+        Job("queued", 1, 1, 1, cpus_per_node=3, memory_mb_per_node=80, gpus_per_node=2),
+        Job(
+            "arriving",
+            5,
+            1,
+            1,
+            cpus_per_node=3,
+            memory_mb_per_node=80,
+            gpus_per_node=2,
+            qos="urgent",
+        ),
+    ]
+    result = simulate(jobs, replace(FIFO, qos=1000), config)
+    assert {run.job.job_id: run.start_time for run in result.jobs} == {
+        "a": 0,
+        "b": 0,
+        "arriving": 5,
+        "queued": 6,
+    }
+
+
 def test_unknown_node_can_be_enabled_after_inventory_is_supplied():
     config = load_config(EXAMPLES / "cds_cluster.json")
     nodes = config.cluster.node_specs

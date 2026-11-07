@@ -107,6 +107,20 @@ def test_backfill_can_use_other_nodes_beyond_the_reserved_start():
     assert next(run for run in result.jobs if run.job.job_id == "small").allocated_nodes == (1,)
 
 
+def test_backfill_sweeps_tied_requested_ends_without_releasing_real_resources():
+    config = SimulationConfig(cluster=Cluster(nodes=2), schedule_interval_seconds=0.7)
+    jobs = [
+        job("a", runtime=4, limit=10, cpus_per_node=2),
+        job("b", runtime=6, limit=10, cpus_per_node=2),
+        job("head", submit=1, nodes=2, cpus_per_node=2),
+        job("small", submit=2, cpus_per_node=2),
+    ]
+    result = simulate(jobs, weights(), config)
+    # Both requested ends are t=10. The reservation must release both projected
+    # allocations together while the actual nodes stay occupied until t=4/t=6.
+    assert starts(result) == {"a": 0, "b": 0, "small": 4, "head": 6}
+
+
 def test_age_and_size_weights_change_scheduling_decisions():
     config = SimulationConfig(
         cluster=Cluster(nodes=1), favor_small=True, max_age_seconds=10, scheduler="strict"
@@ -146,6 +160,53 @@ def test_completions_and_arrivals_at_same_time_precede_dispatch():
     assert starts(simulate(jobs, weights(qos=1000), config)) == {"running": 0, "new": 5, "old": 6}
 
 
+@pytest.mark.parametrize("interval", [0.1, 0.2, 0.3, 0.7])
+@pytest.mark.parametrize("scheduler", ["strict", "easy_backfill"])
+def test_fractional_scheduling_intervals_complete_queued_jobs(interval, scheduler):
+    config = SimulationConfig(
+        cluster=Cluster(nodes=1, cpus_per_node=1),
+        schedule_interval_seconds=interval,
+        scheduler=scheduler,
+    )
+    result = simulate([job("a", runtime=10), job("b")], weights(), config)
+    assert starts(result) == {"a": 0, "b": 10}
+    assert result.metrics["mean_response_time_seconds"] == 10.5
+    assert result.metrics["cpu_utilization"] == 1
+
+
+@pytest.mark.parametrize(
+    "interval,expected_start", [(0.1, 1.5), (0.2, 1.6), (0.3, 1.5), (0.7, 2.1)]
+)
+def test_scheduling_ticks_reorder_pending_jobs_between_arrivals_and_completions(
+    interval, expected_start
+):
+    config = SimulationConfig(
+        cluster=Cluster(nodes=1, cpus_per_node=2),
+        scheduler="strict",
+        max_age_seconds=1,
+        schedule_interval_seconds=interval,
+        qos_priorities={"normal": 0, "urgent": 1},
+    )
+    jobs = [
+        job("running", runtime=10, site_factor=1000),
+        job("head", cpus_per_node=2),
+        job("small", submit=0.6, qos="urgent"),
+    ]
+    result = simulate(jobs, weights(age=100, qos=20), config)
+    # Once the head's age is capped, the small job overtakes it at a scheduling
+    # tick and can use the free CPU before the running job finishes at t=10.
+    assert starts(result) == pytest.approx({"running": 0, "small": expected_start, "head": 10})
+
+
+def test_scheduling_interval_below_timestamp_precision_fails_fast():
+    config = SimulationConfig(
+        cluster=Cluster(nodes=1, cpus_per_node=1), schedule_interval_seconds=0.1
+    )
+    jobs = [job("a", submit=1e16, runtime=4), job("b", submit=1e16, runtime=4)]
+    with pytest.raises(ValueError, match="Scheduling interval is too small"):
+        simulate(jobs, weights(), config)
+
+
 def test_fairshare_changes_after_consuming_resources_and_resets_between_replays():
     config = SimulationConfig(
         cluster=Cluster(nodes=1, cpus_per_node=1),
@@ -174,6 +235,54 @@ def test_initial_account_history_influences_priority():
     )
     jobs = [job("a", account="alice"), job("b", account="bob")]
     assert starts(simulate(jobs, weights(fairshare=1000), config)) == {"b": 0, "a": 1}
+
+
+def test_dispatch_factors_keep_their_original_age_and_usage():
+    config = SimulationConfig(
+        cluster=Cluster(nodes=1, cpus_per_node=1),
+        accounts={"alice": Account(), "bob": Account()},
+        fairshare_half_life_seconds=None,
+        max_age_seconds=10,
+    )
+    jobs = [job("a", runtime=10, account="alice"), job("b", account="alice")]
+    result = simulate(jobs, weights(age=100, fairshare=1000), config)
+    assert result.jobs[0].factors_at_start == priority_factors(
+        jobs[0], 0, {"alice": 0, "bob": 0}, config
+    )
+    assert result.jobs[1].factors_at_start == priority_factors(
+        jobs[1], 10, {"alice": 10, "bob": 0}, config
+    )
+    assert result.jobs[0].factors_at_start["fairshare"] == 1
+    assert result.jobs[1].factors_at_start["fairshare"] == 0.25
+
+
+def test_factor_caches_are_rebuilt_after_configuration_changes_between_replays():
+    config = SimulationConfig(
+        cluster=Cluster(nodes=1, cpus_per_node=1), qos_priorities={"normal": 1, "urgent": 2}
+    )
+    jobs = [job("normal"), job("urgent", qos="urgent")]
+    first = simulate(jobs, weights(qos=1000), config)
+    config.qos_priorities["urgent"] = 0
+    second = simulate(jobs, weights(qos=1000), config)
+    assert starts(first) == {"urgent": 0, "normal": 1}
+    assert starts(second) == {"normal": 0, "urgent": 1}
+    assert first.jobs[0].factors_at_start["qos"] == 1
+    assert second.jobs[1].factors_at_start["qos"] == 0
+
+
+def test_initial_usage_can_decay_before_the_first_job_becomes_eligible():
+    config = SimulationConfig(
+        accounts={
+            "alice": Account(initial_usage_cpu_seconds=1e308),
+            "bob": Account(initial_usage_cpu_seconds=1e308),
+        },
+        fairshare_half_life_seconds=1,
+    )
+    # The initial sum overflows, but at the first dispatch both histories have
+    # decayed to 2.5e307. No priority calculation is needed before that event.
+    result = simulate([job("later", submit=2, account="alice")], weights(fairshare=1000), config)
+    assert result.jobs[0].start_time == 2
+    assert result.jobs[0].factors_at_start["fairshare"] == 0.5
 
 
 def test_other_factors_are_normalized_and_runtime_is_not_a_priority_feature():

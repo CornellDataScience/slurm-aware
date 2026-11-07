@@ -1,0 +1,70 @@
+{
+  "profile_name": "CDS what-if: compute4 matches compute1 (unverified)",
+  "profile_notes": [
+    "Source: FA25 slides and CornellDataScience/computecluster commit 5d281958 (2026-05-28); see docs/cds-cluster.md.",
+    "ASSUMPTION: compute4 copies compute1: 32 logical CPUs, 31921 MiB RAM, 2 RTX 2080 Ti GPUs and x86_64. These compute4 specifications are unverified.",
+    "Slide 9 uses matching desktop-and-two-GPU symbols for compute1 and compute4. This suggests a similar role, not equal measured capacities or GPU models.",
+    "compute2 GPU inventory is unknown; no GPU capacity is modeled there.",
+    "CPU slots use documented logical CPU counts. RAM uses 2025-12-09 MemTotal snapshots, not current free memory or verified Slurm RealMemory.",
+    "Account shares, QoS, priority timing and weights are experiment settings. Persistent-service reservations default to zero.",
+    "Use examples/cds_cluster.json as the documented-capacity baseline. Compare the same workload and candidate weights across both profiles."
+  ],
+  "cluster": {
+    "head_node": "orca",
+    "node_specs": [
+      {
+        "name": "compute1",
+        "cpus": 32,
+        "memory_mb": 31921,
+        "gpus": 2,
+        "architecture": "x86_64",
+        "gpu_type": "rtx2080ti"
+      },
+      {
+        "name": "compute2",
+        "cpus": 20,
+        "memory_mb": 15678,
+        "gpus": null,
+        "architecture": "x86_64"
+      },
+      {
+        "name": "compute3",
+        "cpus": 4,
+        "memory_mb": 7937,
+        "gpus": 0,
+        "architecture": "aarch64"
+      },
+      {
+        "name": "compute4",
+        "cpus": 32,
+        "memory_mb": 31921,
+        "gpus": 2,
+        "architecture": "x86_64",
+        "gpu_type": "rtx2080ti",
+        "enabled": true
+      }
+    ]
+  },
+  "partition_name": "compute",
+  "scheduler": "easy_backfill",
+  "max_age_seconds": 604800,
+  "favor_small": false,
+  "schedule_interval_seconds": 30,
+  "fairshare_half_life_seconds": 604800,
+  "accounts": {
+    "alice": {
+      "share": 1,
+      "initial_usage_cpu_seconds": 0,
+      "priority": 1
+    },
+    "bob": {
+      "share": 1,
+      "initial_usage_cpu_seconds": 0,
+      "priority": 1
+    }
+  },
+  "qos_priorities": {
+    "normal": 1,
+    "urgent": 2
+  }
+}

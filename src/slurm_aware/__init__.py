@@ -1,1 +1,1 @@
-"""Reproducible Slurm scheduling experiments."""
+"""DeepRM-style scheduling simulation and reinforcement learning experiments."""

@@ -1,14 +1,16 @@
 # DeepRM: learning to schedule jobs directly
 
-`src/slurm_aware/deeprm/` replicates and extends the scheduler from Mao et al.,
+`src/slurm_aware/deeprm/` implements a scheduler inspired by Mao et al.,
 "Resource Management with Deep Reinforcement Learning" (HotNets 2016). A policy
 network looks at an image of the cluster and of the waiting jobs and picks which
 job to start next. It is trained with REINFORCE to minimize average job slowdown
 (completion time ÷ ideal duration) and compared with SJF, Packer and Tetris*.
 
-It is separate from `src/slurm_aware/rl/` (see `docs/rl.md`). That package picks
-one set of Slurm priority weights per trace. This one makes every scheduling
+The earlier weight-learning package now lives in `archive/src/slurm_aware/rl/`
+(see the [archived RL guide](../archive/docs/rl.md)). It picks one set of Slurm
+priority weights per trace. The active DeepRM package makes every scheduling
 decision itself, on a pooled cluster model with whole timesteps and resource units.
+See the [archive index](../archive/README.md) for the retired and deferred work.
 
 ## Modules
 
@@ -42,6 +44,8 @@ Each module has its own test file (`tests/test_deeprm_*.py`).
 The environment retains M visible job slots, a backlog count, the `{void, 1..M}`
 actions, time frozen while valid jobs are scheduled, and the slowdown objective.
 Training uses REINFORCE with a per-decision baseline.
+The observation omits the original implementation's time-since-last-arrival
+feature. It is not an exact reproduction of the original DeepRM environment.
 
 ## Event-driven simulator
 
@@ -277,8 +281,8 @@ single-step `advance()` method.
 ## Caveats
 
 - One pooled cluster with no machine boundaries, as in the paper. The
-  node-aware simulator in `docs/simulator.md` would be a separate test of how
-  well results carry over.
+  [archived node-aware simulator](../archive/docs/simulator.md) remains a
+  reference for a separate test of how well results carry over.
 - Backlog observation counts saturate (60 by default), even though jobs are never
   dropped. The policy cannot distinguish larger backlogs from that encoding alone.
 - Job durations remain known, positive whole time units bounded by the lookahead.

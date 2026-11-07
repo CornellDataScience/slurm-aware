@@ -1321,11 +1321,6 @@ deeprm = [
     { name = "numpy", version = "2.5.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "torch" },
 ]
-rl = [
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
-    { name = "numpy", version = "2.5.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
-    { name = "torch" },
-]
 
 [package.dev-dependencies]
 dev = [
@@ -1338,11 +1333,9 @@ requires-dist = [
     { name = "gymnasium", marker = "extra == 'deeprm'", specifier = ">=1.2,<2" },
     { name = "matplotlib", marker = "extra == 'deeprm'", specifier = ">=3.10" },
     { name = "numpy", marker = "extra == 'deeprm'", specifier = ">=2.4.6" },
-    { name = "numpy", marker = "extra == 'rl'", specifier = ">=2.4.6" },
     { name = "torch", marker = "extra == 'deeprm'", specifier = ">=2.14.1" },
-    { name = "torch", marker = "extra == 'rl'", specifier = ">=2.14.1" },
 ]
-provides-extras = ["rl", "deeprm"]
+provides-extras = ["deeprm"]
 
 [package.metadata.requires-dev]
 dev = [

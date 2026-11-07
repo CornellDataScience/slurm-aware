@@ -1,0 +1,4 @@
+workload_type,input_size_mb,iterations,nodes,tasks_per_node,cpus_per_task
+cpu_bound,512,10,1,1,2
+io_bound,1024,2,1,1,1
+mixed,256,5,2,1,2

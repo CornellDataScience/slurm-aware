@@ -1,0 +1,2 @@
+# Preserve archived CSV contents during moves and checkouts.
+*.csv -text whitespace=cr-at-eol

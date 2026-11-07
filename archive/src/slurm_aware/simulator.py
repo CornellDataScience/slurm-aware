@@ -7,11 +7,13 @@ See docs/simulator.md for the scheduling and priority approximations.
 
 from __future__ import annotations
 
+import heapq
 import math
 from dataclasses import asdict, dataclass, field
 from functools import cached_property
+from itertools import groupby
 from statistics import fmean
-from typing import Mapping, Sequence
+from typing import Collection, Iterable, Mapping, Sequence
 
 SIMULATOR_VERSION = 2
 
@@ -364,6 +366,12 @@ def _consume(free: list[list[int]], job: Job, allocation: tuple[int, ...]) -> No
             free[node][resource] -= amount
 
 
+def _release(free: list[list[int]], job: Job, allocation: tuple[int, ...]) -> None:
+    for node in allocation:
+        for resource, amount in enumerate(_resources(job)):
+            free[node][resource] += amount
+
+
 def compatible_node(job: Job, node: Node) -> bool:
     """Architecture/model/name constraints; None means an unrestricted job."""
     return (
@@ -390,19 +398,26 @@ def _place(
 
 
 def _reservation(
-    job: Job, running: Sequence[JobResult], cluster: Cluster
+    job: Job, running: Collection[JobResult], cluster: Cluster, free: list[list[int]]
 ) -> tuple[float, tuple[int, ...]]:
     """Reserve the first blocked job using requested limits, never true runtimes."""
-    for when in sorted({run.start_time + run.job.time_limit for run in running}):
-        remaining = [run for run in running if run.start_time + run.job.time_limit > when]
-        allocation = _place(job, _free_resources(cluster, remaining), cluster)
+    projected_free = [capacity.copy() for capacity in free]
+
+    def requested_end(run: JobResult) -> float:
+        return run.start_time + run.job.time_limit
+
+    for when, ending in groupby(sorted(running, key=requested_end), key=requested_end):
+        # Release every allocation ending at this time before testing placement.
+        for run in ending:
+            _release(projected_free, run.job, run.allocated_nodes)
+        allocation = _place(job, projected_free, cluster)
         if allocation is not None:
             return when, allocation
     raise RuntimeError("A validated job could not be reserved on an empty cluster.")
 
 
 def _advance_usage(
-    usage: dict[str, float], running: Sequence[JobResult], elapsed: float, half_life: float | None
+    usage: dict[str, float], running: Iterable[JobResult], elapsed: float, half_life: float | None
 ) -> None:
     # Exact continuous exponential decay/integration: independent of event frequency.
     if half_life is None:
@@ -424,13 +439,14 @@ def _validate_workload(jobs: Sequence[Job], config: SimulationConfig) -> None:
         raise ValueError("job_id must be unique within a trace.")
     cluster = config.cluster
     names = {node.name for node in cluster.inventory}
+    free = _free_resources(cluster, [])
     for job in jobs:
         unknown_nodes = set(job.allowed_nodes) - names
         if unknown_nodes:
             raise ValueError(
                 f"Job {job.job_id} requests unknown compute nodes: {sorted(unknown_nodes)}"
             )
-        if _place(job, _free_resources(cluster, []), cluster) is None:
+        if _place(job, free, cluster) is None:
             raise ValueError(
                 f"Job {job.job_id} cannot fit on compatible nodes after background reservations."
             )
@@ -480,23 +496,41 @@ def simulate(
     future = sorted(jobs, key=lambda job: (job.eligible_at, job.submit_time, job.job_id))
     cursor = 0
     pending: list[Job] = []
-    running: list[JobResult] = []
+    # Preserve dispatch order for exactly the same floating-point usage updates.
+    running: dict[str, JobResult] = {}
+    completions: list[tuple[float, int, JobResult]] = []
+    free = _free_resources(config.cluster, [])
     results: list[JobResult] = []
     usage = {name: account.initial_usage_cpu_seconds for name, account in config.accounts.items()}
+    shares = math.fsum(account.share for account in config.accounts.values())
+    normalized_shares = {name: account.share / shares for name, account in config.accounts.items()}
+    # Static factors are calculated once per job. Each dictionary belongs to one
+    # job and stops changing when that job starts, preserving its dispatch record.
+    # Age/usage here are placeholders; history may decay before the first arrival.
+    factors_by_job = {job.job_id: priority_factors(job, 0, {}, config) for job in jobs}
     now = 0.0
 
     while cursor < len(future) or pending or running:
-        running = [run for run in running if run.finish_time > now]
+        while completions and completions[0][0] <= now:
+            _, _, completed = heapq.heappop(completions)
+            del running[completed.job.job_id]
+            _release(free, completed.job, completed.allocated_nodes)
         while cursor < len(future) and future[cursor].eligible_at <= now:
             pending.append(future[cursor])
             cursor += 1
 
         scored = []
+        total_usage = math.fsum(usage.values()) if pending else 0.0
+        fairshare = {}
         for job in pending:
-            factors = priority_factors(job, now, usage, config)
+            if job.account not in fairshare:
+                normalized_usage = usage[job.account] / total_usage if total_usage else 0.0
+                fairshare[job.account] = 2 ** (-normalized_usage / normalized_shares[job.account])
+            factors = factors_by_job[job.job_id]
+            factors["age"] = min(1.0, max(0.0, now - job.eligible_at) / config.max_age_seconds)
+            factors["fairshare"] = fairshare[job.account]
             scored.append((_priority(job, factors, weights), job, factors))
         scored.sort(key=lambda item: (-item[0], item[1].submit_time, item[1].job_id))
-        free = _free_resources(config.cluster, running)
         reservation: tuple[float, tuple[int, ...]] | None = None
         started = set()
         for priority, job, factors in scored:
@@ -508,33 +542,39 @@ def simulate(
                 if config.scheduler == "strict":
                     break
                 if reservation is None:
-                    reservation = _reservation(job, running, config.cluster)
+                    reservation = _reservation(job, running.values(), config.cluster, free)
                 continue
             finish = now + job.runtime
             if not math.isfinite(now + job.time_limit) or finish <= now:
                 raise ValueError("Job times exceed supported floating-point precision/range.")
             run = JobResult(job, now, finish, allocation, priority, factors)
-            running.append(run)
+            running[job.job_id] = run
             results.append(run)
+            heapq.heappush(completions, (finish, len(results), run))
             started.add(job.job_id)
             _consume(free, job, allocation)
         pending = [job for job in pending if job.job_id not in started]
 
-        events = [run.finish_time for run in running]
+        events = [completions[0][0]] if completions else []
         if cursor < len(future):
             events.append(future[cursor].eligible_at)
         if pending:
             if not running:
                 raise RuntimeError("Pending jobs made no progress on an empty cluster.")
             interval = config.schedule_interval_seconds
-            next_tick = (math.floor(now / interval) + 1) * interval
+            tick_index = math.floor(now / interval) + 1
+            next_tick = tick_index * interval
+            if next_tick <= now:
+                # At a fractional tick, division can round just below its index.
+                # Advance to the following multiple without shifting the tick grid.
+                next_tick = (tick_index + 1) * interval
             if next_tick <= now:
                 raise ValueError("Scheduling interval is too small for the timestamp scale.")
             events.append(next_tick)
         if not events:
             break
         next_time = min(events)
-        _advance_usage(usage, running, next_time - now, config.fairshare_half_life_seconds)
+        _advance_usage(usage, running.values(), next_time - now, config.fairshare_half_life_seconds)
         now = next_time
 
     metrics = _job_metrics(results)

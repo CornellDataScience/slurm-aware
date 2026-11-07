@@ -267,6 +267,36 @@ Cluster-profile tests also cover heterogeneous capacity, ARM/x86 compatibility,
 GPU models, node affinity, background reservations, unknown inventory, and
 configuration round-tripping.
 
+### Performance comparisons
+
+The event loop keeps completions in a min-heap and updates each node's free
+resources on dispatch/completion. Static priority factors are cached within a
+replay, while age and account fair share are refreshed at scheduling events.
+Backfill reservations sweep requested end times on a separate copy of available
+resources. Actual completion times never supply backfill's estimates. Account
+usage is still accumulated in dispatch order to preserve floating-point results.
+
+To compare an optimization with an earlier implementation, save a copy of
+`src/slurm_aware/simulator.py` before editing, then run:
+
+```sh
+uv run python scripts/benchmark_simulator.py --reference /path/to/reference_simulator.py --output artifacts/simulator-performance.json
+```
+
+The reference must include the fractional scheduling-tick fix. The script checks
+400 seeded, randomized heterogeneous workloads with both scheduling modes,
+fractional intervals, reservations, node affinity, delayed eligibility, and
+varied priorities. It compares every job record, priority factor, allocation,
+timestamp, and metric using exact canonical JSON, without numeric tolerances.
+It also compares the example evaluation/comparison files byte for byte.
+
+Benchmarks warm both implementations, alternate their execution order, and
+report medians and individual samples from five runs on each of six workloads.
+Workload generation, serialization, and file I/O are outside the timed sections.
+`--cases` and `--repeats` adjust the verification and timing counts. The JSON
+report records source checksums and Python/platform details; generated outputs
+are ignored by Git. Timings depend on the local machine and workload.
+
 This establishes the behavior of this simulator. It has **not yet been validated
 against Slurm for multifactor scheduling**. The existing Docker setup uses
 `priority/basic` and no accounting; the public CDS cluster configuration includes
