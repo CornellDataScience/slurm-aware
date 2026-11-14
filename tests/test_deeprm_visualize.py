@@ -1,5 +1,6 @@
 import json
 import re
+from dataclasses import replace
 
 import pytest
 
@@ -11,6 +12,7 @@ from slurm_aware.deeprm.env import DeepRMEnv, EnvConfig  # noqa: E402
 from slurm_aware.deeprm.generator import GeneratorConfig  # noqa: E402
 from slurm_aware.deeprm.jobs import ClusterSpec, Job  # noqa: E402
 from slurm_aware.deeprm.policy import NetworkPolicy, PolicyNetwork  # noqa: E402
+from slurm_aware.deeprm.runtime import RuntimePredictor  # noqa: E402
 from slurm_aware.deeprm.train import TrainConfig, train  # noqa: E402
 from slurm_aware.deeprm.visualize import main, record_episode, render_html  # noqa: E402
 
@@ -82,3 +84,37 @@ def test_cli_writes_page(tmp_path, capsys):
     assert trace["meta"]["policy"] == "tetris" and trace["meta"]["load"] == 1.2
     assert trace["steps"] and all(len(s["probs"]) == 4 for s in trace["steps"])
     assert "tetris" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("mode", ["requested", "predicted"])
+def test_estimated_trace_matches_policy_observation_without_future_runtime(mode):
+    spec = ClusterSpec(("cpu",), (2,))
+    jobs = [Job(0, 0, 4, (2,), requested_duration=2),
+            Job(1, 3, 1, (2,), requested_duration=9)]
+    traces = []
+    for duration in (4, 6):
+        predictor = RuntimePredictor({"version": 1, "resources": ["cpu"], "job_types": [],
+                                      "model": {"kind": "requested"}})
+        env = DeepRMEnv(spec, EnvConfig(2, 2, 6, 30, mode),
+                        predictor=predictor if mode == "predicted" else None)
+        observations = []
+
+        def policy(env):
+            observations.append(env.observation())
+            return SJF()(env)
+
+        trace = record_episode(env, policy, [replace(jobs[0], duration=duration), jobs[1]])
+        assert trace["runtime_mode"] == mode
+        for step, observation in zip(trace["steps"], observations):
+            cluster = np.asarray(step["cluster"][0])
+            np.testing.assert_array_equal(cluster >= 0, observation[:12] > 0)
+            for index, job in enumerate(step["slots"]):
+                expected = np.zeros((2, 6), dtype=bool)
+                if job:
+                    expected[:job["demand"][0], :min(6, int(job["duration"]))] = True
+                offset = 12 * (index + 1)
+                np.testing.assert_array_equal(expected.ravel(), observation[offset:offset + 12] > 0)
+        traces.append(trace)
+    # The first completion has not happened in either trace at these decision points.
+    for a, b in zip(traces[0]["steps"][:3], traces[1]["steps"][:3]):
+        assert a["time"] == b["time"] and a["slots"] == b["slots"] and a["cluster"] == b["cluster"]

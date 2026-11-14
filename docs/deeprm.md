@@ -26,6 +26,7 @@ See the [archive index](../archive/README.md) for the retired and deferred work.
 | `baselines.py` | `SJF`, `Packer`, `TetrisStar`, `RandomFit` as env policies |
 | `evaluate.py` | Slowdown vs. load, withholding/job-size analysis, training cost, plots |
 | `visualize.py` | One-episode decision trace as an offline HTML page (`policy_viz.html`) |
+| `runtime.py` | Submission-time runtime prediction, historical splits, model export and metrics |
 
 Each module has its own test file (`tests/test_deeprm_*.py`).
 
@@ -47,6 +48,17 @@ actions, time frozen while valid jobs are scheduled, and the slowdown objective.
 Training uses REINFORCE with a per-decision baseline.
 The observation omits the original implementation's time-since-last-arrival
 feature. It is not an exact reproduction of the original DeepRM environment.
+
+## Runtime estimates
+
+The default `oracle` mode retains exact-duration observations and existing
+checkpoint behavior. `requested` uses submitted estimates; `predicted` uses a
+frozen predictor embedded in the policy checkpoint. Both estimate modes project
+future occupancy using estimates while retaining actual resource ownership until
+completion. SJF and Tetris* use the same estimates as the agent.
+
+See [runtime prediction](runtime-prediction.md) for training, Gymnasium usage,
+prediction-error reports, and paired scheduling experiments.
 
 ## Event-driven simulator
 
@@ -302,7 +314,9 @@ single-step `advance()` method.
   reference for a separate test of how well results carry over.
 - Backlog observation counts saturate (60 by default), even though jobs are never
   dropped. The policy cannot distinguish larger backlogs from that encoding alone.
-- Job durations remain known, positive whole time units bounded by the lookahead.
+- Actual job durations remain positive whole time units bounded by the lookahead.
+  They are exposed to scheduling only in `oracle` mode. Submitted/predicted
+  estimates can exceed the image horizon; only their displayed width is clipped.
   Jobs start immediately; future reservations and preemption are not implemented.
 - Checkpoints trained with timestep advancement remain shape-compatible, but the
   decision timing and backlog semantics have changed. Retrain for comparisons

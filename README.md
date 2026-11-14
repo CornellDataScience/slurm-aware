@@ -2,9 +2,11 @@
 
 The active project trains and evaluates a DeepRM-style job picker in simulation.
 It generates synthetic workloads, lets a policy select a waiting job or wait,
-and compares scheduling outcomes using job slowdown.
+and compares scheduling outcomes using job slowdown. Runtime estimates can come
+from submitted values or a separately trained predictor; actual runtimes drive
+the simulation. See [runtime prediction](docs/runtime-prediction.md).
 
-The earlier priority-weight experiments, Slurm Docker playground, runtime
+The earlier priority-weight experiments, Slurm Docker playground, original runtime
 prediction experiment, and execution-system plan are preserved in
 [archive/](archive/README.md). The Rust allocator prototype stays at the
 repository root in [allocator/](allocator/README.md).
@@ -90,5 +92,6 @@ preemption are not implemented.
 
 [archive/README.md](archive/README.md) catalogs the retired and deferred work.
 It preserves the former directory layout, including local simulator changes,
-old tests, datasets, reports, and PDF/LaTeX plans. The root package exposes only
-the three DeepRM commands; default test discovery and linting exclude the archive.
+old tests, datasets, reports, and PDF/LaTeX plans. The root package exposes the
+DeepRM commands and runtime predictor training; default test discovery and
+linting exclude the archive.

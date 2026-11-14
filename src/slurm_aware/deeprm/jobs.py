@@ -48,12 +48,17 @@ class Job:
     duration: int
     demand: tuple[int, ...]  # units per resource, ordered like ClusterSpec.resources
     job_type: str = ""
+    requested_duration: int | None = None  # submission-time estimate; not a kill limit
 
     def __post_init__(self) -> None:
         if self.arrival < 0 or self.duration < 1:
             raise ValueError(f"Job {self.job_id}: arrival must be >= 0 and duration >= 1.")
         if any(d < 0 for d in self.demand) or not any(self.demand):
             raise ValueError(f"Job {self.job_id}: demand must be nonnegative and not all zero.")
+        if self.requested_duration is not None and (
+            not isinstance(self.requested_duration, int) or self.requested_duration < 1
+        ):
+            raise ValueError("requested_duration must be a positive integer or None.")
 
     def to_dict(self) -> dict:
         return {
@@ -62,6 +67,7 @@ class Job:
             "duration": self.duration,
             "demand": list(self.demand),
             "job_type": self.job_type,
+            "requested_duration": self.requested_duration,
         }
 
     @classmethod
@@ -72,6 +78,7 @@ class Job:
             int(data["duration"]),
             tuple(int(d) for d in data["demand"]),
             data.get("job_type", ""),
+            data.get("requested_duration"),
         )
 
 

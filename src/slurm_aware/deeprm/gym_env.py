@@ -12,6 +12,7 @@ from slurm_aware.deeprm.backend import ClusterBackend
 from slurm_aware.deeprm.env import DeepRMEnv, EnvConfig
 from slurm_aware.deeprm.generator import GeneratorConfig, JobTraceGenerator
 from slurm_aware.deeprm.jobs import ClusterSpec, Job
+from slurm_aware.deeprm.runtime import RuntimePredictor
 
 
 class DeepRMGymEnv(gym.Env[np.ndarray, int]):
@@ -32,6 +33,7 @@ class DeepRMGymEnv(gym.Env[np.ndarray, int]):
         jobs: Sequence[Job] | None = None,
         generator: JobTraceGenerator | None = None,
         track_decisions: bool = False,
+        predictor: RuntimePredictor | None = None,
     ) -> None:
         super().__init__()
         if jobs is not None and generator is not None:
@@ -48,7 +50,8 @@ class DeepRMGymEnv(gym.Env[np.ndarray, int]):
             if self.generator.config.max_duration > config.lookahead:
                 raise ValueError("Generator max_duration must not exceed lookahead.")
         # Gymnasium reserves `spec` for registration metadata.
-        self.simulator = DeepRMEnv(spec, config, backend, track_decisions=track_decisions)
+        self.simulator = DeepRMEnv(spec, config, backend, track_decisions=track_decisions,
+                                  predictor=predictor)
         self.action_space = spaces.Discrete(self.simulator.n_actions)
         self.observation_space = spaces.Box(
             low=0.0, high=1.0, shape=(self.simulator.observation_size,), dtype=np.float32

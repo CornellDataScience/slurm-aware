@@ -45,17 +45,29 @@ def cluster_owners(env: DeepRMEnv) -> list[list[int]]:
     The in-process backend tracks which job owns each cell. Other backends only
     expose a used/free canvas, so their occupied cells are -2 (job unknown).
     """
+    if env.config.runtime_mode != "oracle":
+        horizon = env.config.lookahead
+        owners = [np.full((c, horizon), -1, dtype=int) for c in env.spec.capacities]
+        offsets = [0] * env.spec.n_resources
+        for job in env.backend.running():
+            elapsed = env.time - env.records[job.job_id].start
+            span = min(horizon, max(1, int(np.ceil(env.estimated_duration(job) - elapsed))))
+            for r, units in enumerate(job.demand):
+                begin = offsets[r]
+                owners[r][begin:begin + units, :span] = job.job_id
+                offsets[r] += units
+        return [owner.ravel().tolist() for owner in owners]
     owners = getattr(env.backend, "_owner", None)
     if owners is not None:
         return [(owner - 1).ravel().tolist() for owner in owners]
     return [np.where(image > 0, -2, -1).ravel().tolist() for image in env.backend.canvas()]
 
 
-def _slot(job: Job | None, now: int) -> dict | None:
+def _slot(job: Job | None, env: DeepRMEnv) -> dict | None:
     if job is None:
         return None
-    return {"id": job.job_id, "duration": job.duration, "demand": list(job.demand),
-            "waited": now - job.arrival}
+    return {"id": job.job_id, "duration": env.estimated_duration(job), "demand": list(job.demand),
+            "waited": env.time - job.arrival}
 
 
 def record_episode(
@@ -71,7 +83,7 @@ def record_episode(
         fitting = env.fitting_slots()
         step = {
             "time": env.time,
-            "slots": [_slot(job, env.time) for job in env.slots],
+            "slots": [_slot(job, env) for job in env.slots],
             "backlog": len(env.backlog),
             "fitting": fitting,
             "cluster": cluster_owners(env),
@@ -106,6 +118,7 @@ def record_episode(
         })
     return {
         "resources": list(env.spec.resources),
+        "runtime_mode": env.config.runtime_mode,
         "capacities": list(env.spec.capacities),
         "lookahead": env.config.lookahead,
         "num_slots": env.config.num_slots,
