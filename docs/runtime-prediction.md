@@ -101,6 +101,8 @@ eligibility uses current free capacity. Rewards and outcome metrics retain actua
 runtimes; rewards are training feedback and are not policy observation features.
 True future occupancy from `backend.canvas()` is used only in oracle mode.
 Estimate modes render running jobs in start order with stable job shades.
+The policy visualizer uses those same estimates for the observation panel and
+labels the runtime mode; its retrospective job timeline retains actual runtimes.
 
 The simulator and backend still contain actual job records for execution and
 evaluation. Custom policies must use `estimated_duration(job)`, `fits_now(job)`,

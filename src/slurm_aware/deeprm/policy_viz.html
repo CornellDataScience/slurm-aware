@@ -165,6 +165,7 @@
       `${name} on test jobset ${meta.jobset ?? "?"} at ${Math.round((meta.load ?? 0) * 100)}% load`;
     document.getElementById("meta").textContent = [
       meta.checkpoint, meta.regime && `${meta.regime} arrivals`, `seed ${meta.seed}`,
+      `${T.runtime_mode || "oracle"} runtime estimates`,
       isDeep ? (meta.greedy ? "argmax actions" : "sampled actions") : null,
       `${T.jobs.length} jobs`,
     ].filter(Boolean).join("  ·  ");
