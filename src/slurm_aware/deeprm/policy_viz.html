@@ -86,10 +86,6 @@
     <span><i style="background:var(--ink);height:2px;vertical-align:3px"></i><span id="lineLabel">p(time advances)</span></span>
   </div>
 
-  <h2>Jobs <small id="ganttSub">thin line = waiting, bar = running; the shaded area is still in the future</small></h2>
-  <canvas id="gantt"></canvas>
-  <div class="hint" id="ganttHint"></div>
-
   <h2 id="stepTitle"></h2>
   <div class="outcome" id="outcome"></div>
   <div class="scroll"><canvas id="obs"></canvas></div>
@@ -106,6 +102,10 @@
       <div class="scroll"><table id="slots"></table></div>
     </div>
   </div>
+
+  <h2>Jobs <small id="ganttSub">thin line = waiting, bar = running; the shaded area is still in the future</small></h2>
+  <canvas id="gantt"></canvas>
+  <div class="hint" id="ganttHint"></div>
 
   <p class="note" id="notes"></p>
 </main>
