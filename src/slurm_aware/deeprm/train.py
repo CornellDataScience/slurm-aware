@@ -47,6 +47,7 @@ from slurm_aware.deeprm.env import (
 from slurm_aware.deeprm.generator import GeneratorConfig, JobTraceGenerator, jobset_seed
 from slurm_aware.deeprm.jobs import Job
 from slurm_aware.deeprm.policy import NetworkPolicy, PolicyNetwork, sample_actions
+from slurm_aware.deeprm.runtime import RUNTIME_MODES, RuntimePredictor, predictor_digest
 
 CHECKPOINT_VERSION = 1
 _ROLLOUT_STREAM = 1000  # SeedSequence spawn-key tag for action sampling, apart from jobsets
@@ -68,6 +69,8 @@ class TrainConfig:
     backlog_size: int = 60
     lookahead: int = 20
     max_time: int = 500
+    runtime_mode: str = "oracle"
+    runtime_predictor: dict | None = None  # fitted JSON artifact, embedded in checkpoints
     # Network
     hidden_sizes: tuple[int, ...] = (20,)
     activation: str = "relu"
@@ -92,10 +95,13 @@ def generator_config(cfg: TrainConfig) -> GeneratorConfig:
 
 
 def env_config(cfg: TrainConfig) -> EnvConfig:
-    return EnvConfig(cfg.num_slots, cfg.backlog_size, cfg.lookahead, cfg.max_time)
+    return EnvConfig(cfg.num_slots, cfg.backlog_size, cfg.lookahead, cfg.max_time, cfg.runtime_mode)
 
 
 def make_env(cfg: TrainConfig, **kwargs) -> DeepRMEnv:
+    if "predictor" not in kwargs:
+        kwargs["predictor"] = (RuntimePredictor(cfg.runtime_predictor)
+                               if cfg.runtime_predictor is not None else None)
     return DeepRMEnv(generator_config(cfg).cluster, env_config(cfg), **kwargs)
 
 
@@ -203,7 +209,8 @@ def _init_worker(cfg_dict: dict, jobsets: list[list[dict]], single_thread: bool)
     _WORKER.update(
         cfg=cfg,
         network=build_network(cfg, env),
-        envs=[env] + [make_env(cfg) for _ in range(cfg.episodes_per_jobset - 1)],
+        envs=[env] + [make_env(cfg, predictor=env.predictor)
+                     for _ in range(cfg.episodes_per_jobset - 1)],
         jobsets=[[Job.from_dict(j) for j in js] for js in jobsets],
     )
 
@@ -339,6 +346,8 @@ def train(
     torch.manual_seed(cfg.seed)
 
     env = make_env(cfg)
+    log(f"Runtime mode: {cfg.runtime_mode}; predictor SHA256: "
+        f"{predictor_digest(cfg.runtime_predictor) or 'none'}")
     network = build_network(cfg, env)
     optimizer = torch.optim.RMSprop(
         network.parameters(), lr=cfg.lr, alpha=cfg.rmsprop_alpha, eps=cfg.rmsprop_eps
@@ -457,6 +466,7 @@ def train(
                     "version": CHECKPOINT_VERSION,
                     "train_config": asdict(cfg),
                     "generator": generator_config(cfg).to_dict(),
+                    "runtime_predictor_sha256": predictor_digest(cfg.runtime_predictor),
                     "policy": network.state_dict(),
                     "optimizer": optimizer.state_dict(),
                     "iteration": iteration,
@@ -475,6 +485,8 @@ def train(
         "fifo_val_metrics": fifo_val,
         "iterations": last_iteration + 1,
         "output": str(output),
+        "runtime_mode": cfg.runtime_mode,
+        "runtime_predictor_sha256": predictor_digest(cfg.runtime_predictor),
     }
 
 
@@ -493,6 +505,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--backlog-size", type=int, default=d.backlog_size)
     parser.add_argument("--lookahead", type=int, default=d.lookahead)
     parser.add_argument("--max-time", type=int, default=d.max_time)
+    parser.add_argument("--runtime-mode", choices=RUNTIME_MODES, default=d.runtime_mode)
+    parser.add_argument("--runtime-model", type=Path, help="Fitted model.json for predicted mode")
     parser.add_argument("--hidden-sizes", type=int, nargs="+", default=list(d.hidden_sizes))
     parser.add_argument("--activation", default=d.activation)
     parser.add_argument("--episodes-per-jobset", type=int, default=d.episodes_per_jobset)
@@ -524,6 +538,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             backlog_size=args.backlog_size,
             lookahead=args.lookahead,
             max_time=args.max_time,
+            runtime_mode=args.runtime_mode,
+            runtime_predictor=(json.loads(args.runtime_model.read_text())
+                               if args.runtime_model else None),
             hidden_sizes=tuple(args.hidden_sizes),
             activation=args.activation,
             episodes_per_jobset=args.episodes_per_jobset,

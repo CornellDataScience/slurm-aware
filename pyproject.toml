@@ -14,8 +14,10 @@ slurm-deeprm-generate = "slurm_aware.deeprm.generator:main"
 slurm-deeprm-train = "slurm_aware.deeprm.train:main"
 slurm-deeprm-evaluate = "slurm_aware.deeprm.evaluate:main"
 slurm-deeprm-visualize = "slurm_aware.deeprm.visualize:main"
+slurm-runtime-train = "slurm_aware.deeprm.runtime:main"
 
 [project.optional-dependencies]
+runtime = ["scikit-learn>=1.5,<2"]
 deeprm = [
     "gymnasium>=1.2,<2",
     "matplotlib>=3.10",

@@ -28,6 +28,7 @@ from slurm_aware.deeprm.baselines import heuristics
 from slurm_aware.deeprm.env import Policy, run_episode, summarize_scheduling_metrics
 from slurm_aware.deeprm.generator import REGIMES, GeneratorConfig, JobTraceGenerator
 from slurm_aware.deeprm.policy import NetworkPolicy
+from slurm_aware.deeprm.runtime import prediction_metrics, predictor_digest
 from slurm_aware.deeprm.train import (
     generator_config,
     load_checkpoint,
@@ -77,6 +78,8 @@ def evaluate_load(
                 finish = record.finish if record.finish is not None else env.time
                 jobs.append({
                     "duration": job.duration,
+                    "estimated_duration": env.estimated_duration(job),
+                    "requested_duration": job.requested_duration,
                     "type": job.job_type,
                     "footprint": job_footprint(job.duration, job.demand, caps),
                     "slowdown": (finish - job.arrival) / job.duration,
@@ -97,6 +100,8 @@ def evaluate_load(
         out[name] = {
             **summarize_scheduling_metrics(episodes, env.spec),
             "mean_slowdown": float(np.mean(slowdowns)) if slowdowns else 0.0,
+            "runtime_prediction": prediction_metrics(
+                [j["duration"] for j in jobs], [j["estimated_duration"] for j in jobs]),
             "mean_wait": float(np.mean([j["wait"] for j in jobs])) if jobs else 0.0,
             "jobs": len(jobs),
             "unfinished_jobs": sum(not j["finished"] for j in jobs),
@@ -278,7 +283,10 @@ def render(report: Mapping) -> str:
     header = "| Load | " + " | ".join(LABELS.get(n, n) for n in names) + " |"
     rule = "| ---: | " + " | ".join("---:" for _ in names) + " |"
     lines = [f"# DeepRM evaluation ({report['jobsets_per_load']} test jobsets per load, "
-             f"regime: {report['regime']})", "", "## Mean job slowdown", "", header, rule]
+             f"regime: {report['regime']})", "",
+             f"Runtime estimates: **{report.get('runtime_mode', 'oracle')}**. "
+             "Completion events and outcome metrics use actual execution times.",
+             "", "## Mean job slowdown", "", header, rule]
     for x in loads:
         row = report["by_load"][str(x)]
         lines.append(f"| {x:.0%} | " + " | ".join(f"{row[n]['mean_slowdown']:.3f}"
@@ -301,6 +309,20 @@ def render(report: Mapping) -> str:
     lines += ["", "Wait percentiles pool all arrived jobs; unstarted jobs contribute their "
               "wait so far (a lower bound). Utilization is resource-unit time divided by "
               "capacity times elapsed episode time, including initial idle time and draining."]
+    if report.get("runtime_mode", "oracle") != "oracle":
+        lines += ["", "## Runtime prediction accuracy", "",
+                  "All policies use the same estimator. "
+                  "Metrics below cover jobs observed by DeepRM.",
+                  "", "| Load | MAE | Within 2x | Underestimated | Mean underestimate* |",
+                  "| ---: | ---: | ---: | ---: | ---: |"]
+        for x in loads:
+            metrics = report["by_load"][str(x)]["deeprm"]["runtime_prediction"]
+            if metrics["jobs"]:
+                lines.append(f"| {x:.0%} | {metrics['mae']:.3f} | "
+                             f"{metrics['within_2x_fraction']:.1%} | "
+                             f"{metrics['underprediction_fraction']:.1%} | "
+                             f"{metrics['mean_underprediction_timesteps']:.3f} |")
+        lines += ["", "*Actual minus estimate among underestimated jobs, in timesteps."]
     lines += ["", "## Withhold rate (time advanced while a visible job fit)", "", header, rule]
     for x in loads:
         row = report["by_load"][str(x)]
@@ -392,6 +414,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         report: dict = {
             "checkpoint": args.checkpoint,
+            "runtime_mode": cfg.runtime_mode,
+            "runtime_predictor_sha256": predictor_digest(cfg.runtime_predictor),
+            "generator": gen_cfg.to_dict(),
             "regime": gen_cfg.arrival.regime,
             "loads": loads,
             "jobsets_per_load": args.jobsets,

@@ -34,6 +34,7 @@ from slurm_aware.deeprm.jobs import ClusterSpec, Job, check_jobset
 GENERATOR_VERSION = 1
 REGIMES = ("steady", "bursty", "diurnal")
 SPLITS = ("train", "val", "test")
+PREDICTOR_SPLITS = ("runtime_train", "runtime_val", "runtime_test")
 # Monte Carlo draws used to estimate expected work per job when converting load to a rate.
 _WORK_ESTIMATE_SAMPLES = 50_000
 
@@ -124,12 +125,17 @@ class GeneratorConfig:
     horizon: int = 50  # timesteps during which jobs arrive (original episode length)
     max_duration: int = 20  # clip; keep equal to the env's lookahead T
     size_correlation: float = 0.8  # 0 = independent dimensions, 1 = one shared size draw
+    estimate_multiplier: float = 2.0  # median submitted / actual runtime before rounding
+    estimate_sigma: float = 0.75  # log-space submission noise; permits underestimation
 
     def __post_init__(self) -> None:
         if self.load <= 0 or self.horizon < 1 or self.max_duration < 1:
             raise ValueError("Need load > 0, horizon >= 1 and max_duration >= 1.")
         if not 0 <= self.size_correlation <= 1:
             raise ValueError("size_correlation must be in [0, 1].")
+        if (not math.isfinite(self.estimate_multiplier) or self.estimate_multiplier <= 0
+                or not math.isfinite(self.estimate_sigma) or self.estimate_sigma < 0):
+            raise ValueError("Need finite estimate_multiplier > 0 and estimate_sigma >= 0.")
         if not self.job_types:
             raise ValueError("At least one job type is required.")
         unknown = {r for jt in self.job_types for r in jt.demand} - set(self.cluster.resources)
@@ -149,6 +155,8 @@ class GeneratorConfig:
             "horizon": self.horizon,
             "max_duration": self.max_duration,
             "size_correlation": self.size_correlation,
+            "estimate_multiplier": self.estimate_multiplier,
+            "estimate_sigma": self.estimate_sigma,
         }
 
     @classmethod
@@ -166,12 +174,14 @@ class GeneratorConfig:
             horizon=data["horizon"],
             max_duration=data["max_duration"],
             size_correlation=data["size_correlation"],
+            estimate_multiplier=data.get("estimate_multiplier", 2.0),
+            estimate_sigma=data.get("estimate_sigma", 0.75),
         )
 
 
 def jobset_seed(seed: int, split: str, index: int) -> np.random.SeedSequence:
     """Independent stream per (base seed, split, jobset index); splits never overlap."""
-    return np.random.SeedSequence(seed, spawn_key=(SPLITS.index(split), index))
+    return np.random.SeedSequence(seed, spawn_key=((SPLITS + PREDICTOR_SPLITS).index(split), index))
 
 
 class JobTraceGenerator:
@@ -208,9 +218,14 @@ class JobTraceGenerator:
         sigmas = np.array([jt.duration_sigma for jt in cfg.job_types])[kinds]
         raw = rng.lognormal(np.log(medians), sigmas)
         durations = np.clip(np.rint(raw), 1, cfg.max_duration).astype(int)
+        # Draw after the physical workload, preserving existing arrival/demand/runtime seeds.
+        noise = rng.lognormal(np.log(cfg.estimate_multiplier), cfg.estimate_sigma, n)
+        requested = np.maximum(1, np.rint(durations * noise))
+        if not np.isfinite(requested).all():
+            raise ValueError("Submission noise produced non-finite runtime estimates.")
         return [
             Job(i, int(arrivals[i]), int(durations[i]), tuple(demand[i].tolist()),
-                cfg.job_types[kinds[i]].name)
+                cfg.job_types[kinds[i]].name, int(requested[i]))
             for i in range(n)
         ]
 

@@ -35,6 +35,7 @@ import numpy as np
 
 from slurm_aware.deeprm.backend import ClusterBackend, InProcessBackend
 from slurm_aware.deeprm.jobs import ClusterSpec, Job, check_jobset
+from slurm_aware.deeprm.runtime import RUNTIME_MODES, RuntimePredictor, submission_features
 
 VOID = 0
 _COMPLETION, _ARRIVAL = 0, 1  # completions sort before arrivals at the same time
@@ -47,10 +48,13 @@ class EnvConfig:
     backlog_size: int = 60  # observation cells, not a queue capacity
     lookahead: int = 20  # T: image width, and the longest placeable job
     max_time: int = 500  # truncation cap in timesteps (arrivals end at the generator horizon)
+    runtime_mode: str = "oracle"
 
     def __post_init__(self) -> None:
         if min(self.num_slots, self.lookahead, self.max_time) < 1 or self.backlog_size < 0:
             raise ValueError("num_slots, lookahead and max_time must be >= 1; backlog >= 0.")
+        if self.runtime_mode not in RUNTIME_MODES:
+            raise ValueError(f"runtime_mode must be one of {RUNTIME_MODES}.")
 
 
 @dataclass
@@ -74,11 +78,17 @@ class DeepRMEnv:
         backend: ClusterBackend | None = None,
         *,
         track_decisions: bool = False,
+        predictor: RuntimePredictor | None = None,
     ) -> None:
         self.spec, self.config = spec, config
         self.backend = backend or InProcessBackend(spec, config.lookahead)
         if self.backend.spec != spec or self.backend.horizon != config.lookahead:
             raise ValueError("Backend spec/horizon must match the environment's.")
+        if (config.runtime_mode == "predicted") != (predictor is not None):
+            raise ValueError("Supply a runtime predictor exactly when runtime_mode='predicted'.")
+        if predictor is not None and predictor.resources != spec.resources:
+            raise ValueError("Runtime predictor resources must match the cluster's order.")
+        self.predictor = predictor
         self.track_decisions = track_decisions
         self.n_actions = config.num_slots + 1
         self._image_size = sum(spec.capacities) * config.lookahead
@@ -95,12 +105,18 @@ class DeepRMEnv:
             check_jobset(jobs, self.spec)
             if any(job.duration > self.config.lookahead for job in jobs):
                 raise ValueError("Job durations must not exceed the lookahead T.")
+            if self.config.runtime_mode != "oracle":
+                for job in jobs:
+                    submission_features(job)  # fail before starting a partially valid trace
             self.jobs = sorted(jobs, key=lambda job: (job.arrival, job.job_id))
         self.backend.reset()
         self.time = 0
         self.slots: list[Job | None] = [None] * self.config.num_slots
         self.backlog: deque[Job] = deque()
         self.records = {job.job_id: JobRecord(job) for job in self.jobs}
+        self._estimates: dict[int, float] = {}
+        self._shades: dict[int, float] = {}
+        self._scheduled_count = 0
         self.dropped: list[Job] = []
         self.decisions: list[dict] = []
         self._events: list[tuple[int, int, int, int]] = []
@@ -120,6 +136,8 @@ class DeepRMEnv:
         job = self.slots[action - 1] if action != VOID else None
         if job is not None and self.backend.allocate(job, self.time):
             self.records[job.job_id].start = self.time
+            self._shades[job.job_id] = float(1 - (self._scheduled_count % 40) / 40)
+            self._scheduled_count += 1
             self._push_event(self.time + job.duration, _COMPLETION, job.job_id)
             self.slots[action - 1] = self.backlog.popleft() if self.backlog else None
             if self.track_decisions:
@@ -148,13 +166,16 @@ class DeepRMEnv:
         cfg, T = self.config, self.config.lookahead
         obs = np.zeros(self.observation_size, dtype=np.float32)
         offset = 0
-        for image in self.backend.canvas():
+        cluster = (self.backend.canvas() if cfg.runtime_mode == "oracle"
+                   else self._estimated_canvas())
+        for image in cluster:
             obs[offset : offset + image.size] = image.ravel()
             offset += image.size
         for job in self.slots:
             for units, capacity in zip(job.demand if job else (), self.spec.capacities):
                 image = obs[offset : offset + capacity * T].reshape(capacity, T)
-                image[:units, : job.duration] = 1.0
+                span = min(T, int(np.ceil(self.estimated_duration(job))))
+                image[:units, :span] = 1.0
                 offset += capacity * T
             if job is None:
                 offset += self._image_size
@@ -177,8 +198,32 @@ class DeepRMEnv:
         return [
             m + 1
             for m, job in enumerate(self.slots)
-            if job is not None and self.backend.fits(job)
+            if job is not None and self.fits_now(job)
         ]
+
+    def fits_now(self, job: Job) -> bool:
+        """Immediate starts use observed free capacity, independent of estimated duration."""
+        if self.config.runtime_mode == "oracle":
+            return self.backend.fits(job)
+        return bool(np.all(self.backend.available()[0] >= np.asarray(job.demand)))
+
+    def estimated_duration(self, job: Job) -> float:
+        """The runtime available to schedulers; estimates are frozen at arrival."""
+        return self._estimates[job.job_id]
+
+    def _estimated_canvas(self) -> list[np.ndarray]:
+        """Project known running jobs using estimates, keeping overruns visible now."""
+        T = self.config.lookahead
+        images = [np.zeros((c, T), dtype=np.float32) for c in self.spec.capacities]
+        offsets = [0] * self.spec.n_resources
+        for job in self.backend.running():
+            elapsed = self.time - self.records[job.job_id].start
+            span = min(T, max(1, int(np.ceil(self.estimated_duration(job) - elapsed))))
+            for r, units in enumerate(job.demand):
+                begin = offsets[r]
+                images[r][begin:begin + units, :span] = self._shades[job.job_id]
+                offsets[r] += units
+        return images
 
     def slowdowns(self, include_unfinished: bool = False) -> list[float]:
         """Admitted jobs' slowdowns; unfinished ones optionally as (now - arrival) / duration,
@@ -216,15 +261,26 @@ class DeepRMEnv:
         heappush(self._events, (time, kind, next(self._event_sequence), job_id))
 
     def _process_events(self) -> None:
+        arrivals = []
         while self._events and self._events[0][0] == self.time:
             time, kind, _, job_id = heappop(self._events)
             record = self.records[job_id]
             if kind == _COMPLETION:
                 record.finish = time
-            elif None in self.slots:
-                self.slots[self.slots.index(None)] = record.job
             else:
-                self.backlog.append(record.job)
+                arrivals.append(record.job)
+                if None in self.slots:
+                    self.slots[self.slots.index(None)] = record.job
+                else:
+                    self.backlog.append(record.job)
+        if self.predictor is not None:
+            estimates = self.predictor.predict(arrivals)
+        elif self.config.runtime_mode == "requested":
+            estimates = [job.requested_duration for job in arrivals]
+        else:
+            estimates = [job.duration for job in arrivals]
+        self._estimates.update((job.job_id, float(estimate))
+                               for job, estimate in zip(arrivals, estimates))
 
     def _finished(self) -> bool:
         return not self._events and not self.jobs_in_system()

@@ -23,15 +23,16 @@ def packer_score(job: Job, free_now: np.ndarray, capacities: np.ndarray) -> floa
     return float((np.array(job.demand) / capacities) @ (free_now / capacities)) / len(capacities)
 
 
-def sjf_score(job: Job) -> float:
+def sjf_score(duration: float) -> float:
     """Higher for shorter jobs, in (0, 1]."""
-    return 1.0 / job.duration
+    return 1.0 / duration
 
 
 class _ScoredHeuristic:
     name = "heuristic"
 
-    def score(self, job: Job, free_now: np.ndarray, capacities: np.ndarray) -> float:
+    def score(self, job: Job, free_now: np.ndarray, capacities: np.ndarray,
+              duration: float) -> float:
         raise NotImplementedError
 
     def __call__(self, env: DeepRMEnv) -> int:
@@ -40,7 +41,8 @@ class _ScoredHeuristic:
             return VOID
         free_now = env.backend.available()[0].astype(float)
         capacities = np.array(env.spec.capacities, dtype=float)
-        scores = [self.score(env.slots[a - 1], free_now, capacities) for a in fitting]
+        scores = [self.score(env.slots[a - 1], free_now, capacities,
+                             env.estimated_duration(env.slots[a - 1])) for a in fitting]
         return fitting[int(np.argmax(scores))]  # Ties go to the lowest slot.
 
 
@@ -49,8 +51,8 @@ class SJF(_ScoredHeuristic):
 
     name = "sjf"
 
-    def score(self, job, free_now, capacities):
-        return sjf_score(job)
+    def score(self, job, free_now, capacities, duration):
+        return sjf_score(duration)
 
 
 class FIFO:
@@ -64,7 +66,7 @@ class FIFO:
             return VOID
         action = min(waiting, key=lambda a: (env.slots[a - 1].arrival,
                                              env.slots[a - 1].job_id))
-        return action if env.backend.fits(env.slots[action - 1]) else VOID
+        return action if env.fits_now(env.slots[action - 1]) else VOID
 
 
 class Packer(_ScoredHeuristic):
@@ -72,7 +74,7 @@ class Packer(_ScoredHeuristic):
 
     name = "packer"
 
-    def score(self, job, free_now, capacities):
+    def score(self, job, free_now, capacities, duration):
         return packer_score(job, free_now, capacities)
 
 
@@ -86,9 +88,9 @@ class TetrisStar(_ScoredHeuristic):
             raise ValueError("sjf_weight must be in [0, 1].")
         self.sjf_weight = sjf_weight
 
-    def score(self, job, free_now, capacities):
+    def score(self, job, free_now, capacities, duration):
         w = self.sjf_weight
-        return (1 - w) * packer_score(job, free_now, capacities) + w * sjf_score(job)
+        return (1 - w) * packer_score(job, free_now, capacities) + w * sjf_score(duration)
 
 
 class RandomFit:
