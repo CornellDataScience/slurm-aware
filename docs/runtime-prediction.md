@@ -136,8 +136,28 @@ selected on validation in all three seeds. Held-out predictor MAE was:
 | 1 | 9.388 | 2.708 | 1.926 |
 | 2 | 9.960 | 2.901 | 2.156 |
 
+The three runtime modes compare as follows. Prediction MAE is averaged over the
+three held-out predictor test splits. Scheduling slowdown is averaged equally
+over all 18 seed/load/regime combinations; lower is better.
+
+| Mode | Runtime supplied to scheduler | Runtime MAE | SJF slowdown | Tetris* slowdown | DeepRM truncated |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Oracle | Actual execution time | 0 | 3.035 | 3.219 | 90/90 |
+| Requested | Simulated submitted estimate | 9.271 | 3.581 | 3.692 | 90/90 |
+| Predicted | Frozen ridge prediction | 2.014 | 3.578 | 3.590 | 90/90 |
+
+Learned predictions reduced runtime MAE by 78.3% relative to submitted estimates.
+SJF's average slowdown was nearly unchanged; Tetris*'s was 2.8% lower. Oracle
+timing produced the lowest average slowdown for both heuristics in this run.
+The prediction-error reduction therefore translated into a much smaller change
+in scheduling outcomes on these synthetic traces.
+
 All 270 greedy DeepRM evaluation episodes truncated across the three modes;
 the heuristic evaluations completed. The short run verifies integration and
 prediction accuracy but does not establish an RL scheduling improvement.
+The reported DeepRM slowdowns were 49.779 (oracle), 45.419 (requested), and
+52.851 (predicted), with unfinished jobs counted only through the 1,000-timestep
+limit. These are lower bounds and do not establish a ranking of the modes for
+completed RL schedules.
 Detailed local outputs are in `artifacts/runtime-comparison-smoke/`, which is
 Git-ignored along with other experiment artifacts.
