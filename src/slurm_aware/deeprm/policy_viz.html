@@ -1,0 +1,535 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Policy trace</title>
+<style>
+  :root {
+    --ink: #1d1d1b;
+    --muted: #6d6b64;
+    --faint: #a3a198;
+    --rule: #dcdad2;
+    --free: #eceae3;
+    --bg: #fbfaf6;
+    --start: #2a78d6;
+    --held: #c4561d;
+    --idle: #b5b3aa;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 14px/1.45 "Helvetica Neue", Helvetica, Arial, sans-serif;
+  }
+  main { max-width: 1200px; margin: 0 auto; padding: 18px 16px 40px; }
+  h1 { font-size: 16px; font-weight: 600; margin: 0; }
+  h2 {
+    font-size: 13px; font-weight: 600; margin: 26px 0 8px;
+    padding-bottom: 4px; border-bottom: 1px solid var(--rule);
+  }
+  h2 small { font-weight: 400; color: var(--muted); margin-left: 6px; }
+  .mono, td.n, .stats b { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  .meta { color: var(--muted); font-family: var(--mono); font-size: 12px; margin-top: 2px; }
+  .stats { display: flex; flex-wrap: wrap; gap: 4px 22px; margin-top: 12px; font-size: 13px; }
+  .stats span { color: var(--muted); }
+  .stats b { color: var(--ink); font-weight: 500; margin-left: 4px; }
+  .controls { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin-top: 8px; }
+  .controls input[type=range] { flex: 1 1 260px; accent-color: var(--ink); }
+  button {
+    font: inherit; font-size: 12px; color: var(--ink); background: transparent;
+    border: 1px solid var(--rule); border-radius: 2px; padding: 2px 8px; cursor: pointer;
+  }
+  button:hover { border-color: var(--muted); }
+  .key { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 12px; color: var(--muted); margin-top: 6px; }
+  .key i { display: inline-block; width: 9px; height: 9px; margin-right: 5px; vertical-align: -1px; }
+  canvas { display: block; }
+  .hint { font-size: 12px; color: var(--muted); min-height: 18px; margin-top: 4px; font-family: var(--mono); }
+  .outcome { font-size: 14px; margin: 4px 0 10px; }
+  .outcome .held { color: var(--held); }
+  .scroll { overflow-x: auto; }
+  .cols { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 6fr); gap: 28px; }
+  @media (max-width: 820px) { .cols { grid-template-columns: 1fr; } }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th { text-align: left; font-weight: 500; color: var(--muted); font-size: 12px; padding: 3px 8px 3px 0; border-bottom: 1px solid var(--rule); }
+  td { padding: 3px 8px 3px 0; border-bottom: 1px solid #ecebe5; white-space: nowrap; }
+  th.n, td.n { text-align: right; }
+  tr.chosen td { font-weight: 600; }
+  tr.empty td { color: var(--faint); }
+  tr:hover td { background: #f3f1ea; }
+  .sw { display: inline-block; width: 9px; height: 9px; margin-right: 6px; vertical-align: -1px; }
+  .note { font-size: 12px; color: var(--muted); max-width: 760px; }
+  .probtext { font-size: 12px; color: var(--muted); margin-top: 6px; font-family: var(--mono); }
+</style>
+</head>
+<body>
+<main>
+  <h1 id="title"></h1>
+  <div class="meta" id="meta"></div>
+  <div class="stats" id="stats"></div>
+
+  <h2>Decisions <small>click or drag to move; arrow keys step, shift+arrow jumps 10</small></h2>
+  <canvas id="strip"></canvas>
+  <div class="controls">
+    <button id="prev">&larr; prev</button>
+    <button id="next">next &rarr;</button>
+    <button id="nextHeld">next held-back job</button>
+    <input type="range" id="slider" min="0" value="0">
+    <span class="mono" id="pos"></span>
+  </div>
+  <div class="key">
+    <span><i style="background:var(--start)"></i>started a job</span>
+    <span><i style="background:var(--idle)"></i>time advanced, nothing fit</span>
+    <span><i style="background:var(--held)"></i>time advanced although a job fit</span>
+    <span><i style="background:var(--ink);height:2px;vertical-align:3px"></i><span id="lineLabel">p(time advances)</span></span>
+  </div>
+
+  <h2>Jobs <small id="ganttSub">thin line = waiting, bar = running; the shaded area is still in the future</small></h2>
+  <canvas id="gantt"></canvas>
+  <div class="hint" id="ganttHint"></div>
+
+  <h2 id="stepTitle"></h2>
+  <div class="outcome" id="outcome"></div>
+  <div class="scroll"><canvas id="obs"></canvas></div>
+  <div class="hint" id="obsHint"></div>
+
+  <div class="cols">
+    <div>
+      <h2 id="probTitle">Action probabilities</h2>
+      <svg id="probs" width="100%" height="170"></svg>
+      <div class="probtext" id="probText"></div>
+    </div>
+    <div>
+      <h2>Visible jobs</h2>
+      <div class="scroll"><table id="slots"></table></div>
+    </div>
+  </div>
+
+  <p class="note" id="notes"></p>
+</main>
+
+<script type="application/json" id="trace">__TRACE_JSON__</script>
+<script>
+(function () {
+  "use strict";
+  const T = JSON.parse(document.getElementById("trace").textContent);
+  const steps = T.steps, N = steps.length, M = T.num_slots, L = T.lookahead;
+  const R = T.resources.length, caps = T.capacities;
+  const meta = T.meta || {};
+  const css = getComputedStyle(document.documentElement);
+  const C = name => css.getPropertyValue(name).trim();
+  const INK = C("--ink"), MUTED = C("--muted"), FAINT = C("--faint"), RULE = C("--rule");
+  const FREE = C("--free"), BG = C("--bg");
+  const KIND = { start: C("--start"), held: C("--held"), idle: C("--idle") };
+  const PAL = ["#4e79a7", "#e8853a", "#59a14f", "#d6544f", "#6fb2ac", "#d8b13c",
+               "#a87aa0", "#e898a2", "#94705a", "#7d9cc4", "#c26a8d", "#8fbf6f"];
+  const color = id => id === -2 ? FAINT : PAL[((id % PAL.length) + PAL.length) % PAL.length];
+  const jobs = new Map(T.jobs.map(j => [j.id, j]));
+  const fmt = (x, d = 2) => (x === null || x === undefined) ? "–" : Number(x).toFixed(d);
+  const isDeep = meta.policy === "deeprm";
+
+  let cur = 0, hover = null;
+
+  // Index of the decision that started each job, for jumping from the timeline.
+  const startStep = new Map();
+  steps.forEach((s, i) => { if (s.started !== null) startStep.set(s.started, i); });
+  const kind = s => s.started !== null ? "start" : (s.withheld ? "held" : "idle");
+  const pAdvance = s => {
+    if (!s.probs) return null;
+    let p = s.probs[0];
+    for (let a = 1; a <= M; a++) if (!s.fitting.includes(a)) p += s.probs[a];
+    return p;
+  };
+
+  function canvas2d(el, w, h) {
+    const d = window.devicePixelRatio || 1;
+    el.width = Math.round(w * d); el.height = Math.round(h * d);
+    el.style.width = w + "px"; el.style.height = h + "px";
+    const g = el.getContext("2d");
+    g.setTransform(d, 0, 0, d, 0, 0);
+    g.clearRect(0, 0, w, h);
+    return g;
+  }
+  const width = el => el.parentElement.clientWidth;
+  const resLabel = r => T.resources[r];
+  const demandText = d => d.map((u, r) => `${resLabel(r)} ${u}`).join(", ");
+
+  // ---- header ---------------------------------------------------------------
+  function header() {
+    const name = { deeprm: "DeepRM", sjf: "SJF", fifo: "FIFO", packer: "Packer",
+                   tetris: "Tetris*", random: "Random" }[meta.policy] || meta.policy || "policy";
+    document.title = `${name} trace, jobset ${meta.jobset ?? ""}`;
+    document.getElementById("title").textContent =
+      `${name} on test jobset ${meta.jobset ?? "?"} at ${Math.round((meta.load ?? 0) * 100)}% load`;
+    document.getElementById("meta").textContent = [
+      meta.checkpoint, meta.regime && `${meta.regime} arrivals`, `seed ${meta.seed}`,
+      isDeep ? (meta.greedy ? "argmax actions" : "sampled actions") : null,
+      `${T.jobs.length} jobs`,
+    ].filter(Boolean).join("  ·  ");
+    const s = T.summary;
+    const util = Object.entries(s.utilization).map(([r, u]) => `${r} ${Math.round(u * 100)}%`).join(" ");
+    const items = [
+      ["mean slowdown", fmt(s.mean_slowdown, 3)],
+      ["p95 wait", fmt(s.p95_wait, 1)],
+      ["p99 wait", fmt(s.p99_wait, 1)],
+      ["utilization", util],
+      ["decisions", s.decisions],
+      ["held back", `${s.withheld}`],
+      ["ended at t", s.timesteps + (s.truncated ? ` (truncated, ${s.unfinished} unfinished)` : "")],
+    ];
+    document.getElementById("stats").innerHTML =
+      items.map(([k, v]) => `<div><span>${k}</span><b>${v}</b></div>`).join("");
+    document.getElementById("lineLabel").textContent =
+      isDeep ? "p(time advances)" : "DeepRM's p(time advances) in this state";
+    document.getElementById("slider").max = Math.max(0, N - 1);
+    if (clipped) {
+      document.getElementById("ganttSub").textContent +=
+        `. The episode was truncated at t = ${s.timesteps}; the axis stops at ${tEnd} and ` +
+        `lines reaching the right edge are jobs that never started`;
+    }
+    document.getElementById("notes").textContent =
+      "p(time advances) adds the wait action and every action that cannot start a job (an empty " +
+      "slot or a job that does not fit), since the simulator treats those as waiting. " +
+      "Several decisions can share a timestep: starting a job keeps time frozen. " +
+      "The observation grid is the network input: one row per resource, the cluster for the next " +
+      `${L} timesteps, then each slot's demand over its duration, then the backlog count. ` +
+      "Waits are in timesteps; unfinished jobs count with their slowdown so far.";
+  }
+
+  // ---- decision strip -------------------------------------------------------
+  const strip = document.getElementById("strip");
+  const STRIP_H = 74, BAND = 14, LINE_TOP = 22;
+  function drawStrip() {
+    const W = width(strip), g = canvas2d(strip, W, STRIP_H);
+    const dx = W / Math.max(N, 1), gap = dx > 3 ? 1 : 0;
+    steps.forEach((s, i) => {
+      g.fillStyle = KIND[kind(s)];
+      g.fillRect(i * dx, 0, Math.max(1, dx - gap), BAND);
+    });
+    const lh = STRIP_H - LINE_TOP - 2;
+    g.strokeStyle = RULE; g.lineWidth = 1;
+    g.beginPath(); g.moveTo(0, LINE_TOP + 0.5); g.lineTo(W, LINE_TOP + 0.5);
+    g.moveTo(0, LINE_TOP + lh + 0.5); g.lineTo(W, LINE_TOP + lh + 0.5); g.stroke();
+    g.fillStyle = FAINT; g.font = "10px " + C("--mono");
+    g.fillText("1", 2, LINE_TOP + 10); g.fillText("0", 2, LINE_TOP + lh - 2);
+    g.strokeStyle = INK; g.lineWidth = 1.2; g.beginPath();
+    let open = false;
+    steps.forEach((s, i) => {
+      const p = pAdvance(s);
+      if (p === null) { open = false; return; }
+      const x = (i + 0.5) * dx, y = LINE_TOP + (1 - p) * lh;
+      open ? g.lineTo(x, y) : g.moveTo(x, y);
+      open = true;
+    });
+    g.stroke();
+    const x = (cur + 0.5) * dx;
+    g.fillStyle = INK; g.fillRect(Math.round(x) - 1, 0, 2, STRIP_H);
+  }
+  function stripStep(e) {
+    const r = strip.getBoundingClientRect();
+    return Math.min(N - 1, Math.max(0, Math.floor((e.clientX - r.left) / r.width * N)));
+  }
+  let dragging = false;
+  strip.addEventListener("pointerdown", e => { dragging = true; strip.setPointerCapture(e.pointerId); go(stripStep(e)); });
+  strip.addEventListener("pointermove", e => { if (dragging) go(stripStep(e)); });
+  strip.addEventListener("pointerup", () => { dragging = false; });
+  strip.style.cursor = "pointer";
+
+  // ---- job timeline ---------------------------------------------------------
+  const gantt = document.getElementById("gantt");
+  const order = [...T.jobs].sort((a, b) => a.arrival - b.arrival || a.id - b.id);
+  // A truncated episode jumps straight to max_time; clip the axis to where things happen.
+  const lastEvent = Math.max(1, ...T.jobs.map(j => Math.max(j.arrival, j.finish ?? 0)),
+                             ...steps.map(s => s.time));
+  const clipped = T.summary.timesteps > lastEvent * 1.5;
+  const tEnd = clipped ? Math.ceil(lastEvent * 1.1) + 1 : Math.max(T.summary.timesteps, lastEvent);
+  const PAD_L = 34, PAD_R = 8, AXIS = 18;
+  const rowH = Math.max(2, Math.min(6, Math.floor(260 / Math.max(order.length, 1))));
+  let gx = t => t;
+  function drawGantt() {
+    const W = width(gantt), H = order.length * rowH + AXIS + 2;
+    const g = canvas2d(gantt, W, H);
+    gx = t => PAD_L + t / tEnd * (W - PAD_L - PAD_R);
+    const now = steps[cur] ? steps[cur].time : 0;
+    order.forEach((j, row) => {
+      const y = row * rowH;
+      const start = j.start ?? tEnd, finish = j.finish ?? tEnd;
+      g.fillStyle = FAINT;
+      g.fillRect(gx(j.arrival), y + rowH / 2 - 0.5, Math.max(1, gx(start) - gx(j.arrival)), 1);
+      if (j.start !== null) {
+        g.fillStyle = color(j.id);
+        g.fillRect(gx(start), y + (rowH > 3 ? 0.5 : 0), Math.max(1, gx(finish) - gx(start)), rowH > 3 ? rowH - 1 : rowH);
+      }
+    });
+    if (hover !== null && jobs.has(hover)) {
+      const row = order.findIndex(j => j.id === hover), j = jobs.get(hover);
+      g.strokeStyle = INK; g.lineWidth = 1;
+      g.strokeRect(gx(j.arrival) - 0.5, row * rowH - 1.5, gx(j.finish ?? tEnd) - gx(j.arrival) + 1, rowH + 2);
+    }
+    const yAxis = order.length * rowH + 1;
+    g.fillStyle = BG; g.globalAlpha = 0.62;
+    g.fillRect(gx(now), 0, W - PAD_R - gx(now), yAxis);
+    g.globalAlpha = 1;
+    g.fillStyle = INK; g.fillRect(Math.round(gx(now)) - 1, 0, 2, yAxis);
+    g.strokeStyle = RULE; g.beginPath(); g.moveTo(PAD_L, yAxis + 0.5); g.lineTo(W - PAD_R, yAxis + 0.5); g.stroke();
+    g.fillStyle = MUTED; g.font = "10px " + C("--mono"); g.textAlign = "center";
+    const tick = [1, 2, 5, 10, 20, 25, 50, 100, 200, 500].find(t => tEnd / t <= 12) || 1000;
+    for (let t = 0; t <= tEnd; t += tick) {
+      g.fillRect(gx(t), yAxis, 1, 3);
+      g.fillText(String(t), gx(t), yAxis + 13);
+    }
+    g.textAlign = "left"; g.fillText("t", 2, yAxis + 13);
+  }
+  function ganttJob(e) {
+    const r = gantt.getBoundingClientRect();
+    const row = Math.floor((e.clientY - r.top) / rowH);
+    return row >= 0 && row < order.length ? order[row].id : null;
+  }
+  gantt.addEventListener("mousemove", e => setHover(ganttJob(e)));
+  gantt.addEventListener("mouseleave", () => setHover(null));
+  gantt.addEventListener("click", e => {
+    const id = ganttJob(e);
+    if (id !== null && startStep.has(id)) go(startStep.get(id));
+  });
+  gantt.style.cursor = "pointer";
+
+  // ---- observation ----------------------------------------------------------
+  const obs = document.getElementById("obs");
+  let hits = [];
+  function drawObs() {
+    const s = steps[cur]; if (!s) return;
+    const rows = caps.reduce((a, b) => a + b, 0);
+    const bcols = Math.ceil(T.backlog_size / rows);
+    const LBL = 46, GAP = 7, RGAP = 8, TOP = 16, BOT = 16;
+    const avail = width(obs) - LBL - GAP * (M + 2);
+    const cell = Math.max(3, Math.min(10, Math.floor(avail / ((1 + M) * L + bcols))));
+    const inner = cell >= 5 ? 1 : 0;
+    const imgW = L * cell;
+    const H = TOP + rows * cell + RGAP * (R - 1) + BOT;
+    const W = LBL + imgW * (1 + M) + GAP * (M + 1) + Math.max(bcols * cell, 64) + 2;
+    const g = canvas2d(obs, W, H);
+    hits = [];
+    const colX = c => LBL + c * (imgW + GAP);
+    const rowY = []; let y = TOP;
+    for (let r = 0; r < R; r++) { rowY.push(y); y += caps[r] * cell + RGAP; }
+
+    g.font = "11px " + C("--mono"); g.textBaseline = "alphabetic";
+    g.fillStyle = MUTED; g.fillText("cluster", colX(0), 11);
+    for (let m = 0; m < M; m++) {
+      const fits = s.fitting.includes(m + 1), job = s.slots[m];
+      g.fillStyle = job === null ? FAINT : (fits ? KIND.start : MUTED);
+      g.fillText(String(m + 1) + (job !== null && !fits ? " ✕" : ""), colX(m + 1), 11);
+    }
+    const bx = colX(M + 1);
+    g.fillStyle = MUTED; g.fillText("backlog", bx, 11);
+
+    for (let r = 0; r < R; r++) {
+      const y0 = rowY[r];
+      g.fillStyle = MUTED; g.textBaseline = "middle";
+      g.fillText(`${resLabel(r)}`, 0, y0 + caps[r] * cell / 2 - 6);
+      g.fillStyle = FAINT; g.fillText(`${caps[r]}`, 0, y0 + caps[r] * cell / 2 + 7);
+      g.textBaseline = "alphabetic";
+      const grid = s.cluster[r];
+      for (let u = 0; u < caps[r]; u++) for (let t = 0; t < L; t++) {
+        const id = grid[u * L + t];
+        g.fillStyle = id === -1 ? FREE : color(id);
+        g.fillRect(colX(0) + t * cell, y0 + u * cell, cell - inner, cell - inner);
+      }
+      hits.push({ x: colX(0), y: y0, w: imgW, h: caps[r] * cell, cell, r, slot: 0 });
+      for (let m = 0; m < M; m++) {
+        const job = s.slots[m], x0 = colX(m + 1);
+        for (let u = 0; u < caps[r]; u++) for (let t = 0; t < L; t++) {
+          const on = job && u < job.demand[r] && t < job.duration;
+          g.fillStyle = on ? color(job.id) : FREE;
+          if (!job) g.globalAlpha = 0.5;
+          g.fillRect(x0 + t * cell, y0 + u * cell, cell - inner, cell - inner);
+          g.globalAlpha = 1;
+        }
+        hits.push({ x: x0, y: y0, w: imgW, h: caps[r] * cell, cell, r, slot: m + 1 });
+      }
+    }
+    // Backlog: the observation has backlog_size cells, filled up to the queue length.
+    const shown = Math.min(s.backlog, T.backlog_size);
+    for (let k = 0; k < T.backlog_size; k++) {
+      const c = Math.floor(k / rows), u = k % rows;
+      let yy = TOP + u * cell;
+      for (let r = 0, acc = 0; r < R; r++) { if (u >= acc + caps[r]) yy += RGAP; acc += caps[r]; }
+      g.fillStyle = k < shown ? MUTED : FREE;
+      g.fillRect(bx + c * cell, yy, cell - inner, cell - inner);
+    }
+    g.fillStyle = MUTED;
+    g.fillText(s.backlog > T.backlog_size ? `${T.backlog_size}+ (${s.backlog})` : String(s.backlog),
+               bx, H - 3);
+    g.fillStyle = FAINT; g.fillText(`now → t+${L - 1}`, colX(0), H - 3);
+
+    // Outline the chosen slot, and whatever job is hovered.
+    if (s.action > 0) {
+      g.strokeStyle = s.started !== null ? INK : KIND.held; g.lineWidth = 1.5;
+      g.strokeRect(colX(s.action) - 3, TOP - 3, imgW + 5, H - TOP - BOT + 4);
+    }
+    if (hover !== null) {
+      g.strokeStyle = INK; g.lineWidth = 1;
+      for (let r = 0; r < R; r++) for (let u = 0; u < caps[r]; u++) for (let t = 0; t < L; t++) {
+        if (s.cluster[r][u * L + t] === hover) {
+          g.strokeRect(colX(0) + t * cell - 0.5, rowY[r] + u * cell - 0.5, cell, cell);
+        }
+      }
+      const m = s.slots.findIndex(j => j && j.id === hover);
+      if (m >= 0) { g.lineWidth = 1; g.strokeRect(colX(m + 1) - 1.5, TOP - 1.5, imgW + 2, H - TOP - BOT); }
+    }
+  }
+  function obsJob(e) {
+    const s = steps[cur], r0 = obs.getBoundingClientRect();
+    const x = e.clientX - r0.left, y = e.clientY - r0.top;
+    for (const h of hits) {
+      if (x < h.x || x >= h.x + h.w || y < h.y || y >= h.y + h.h) continue;
+      if (h.slot > 0) { const j = s.slots[h.slot - 1]; return j ? j.id : null; }
+      const u = Math.floor((y - h.y) / h.cell), t = Math.floor((x - h.x) / h.cell);
+      const id = s.cluster[h.r][u * L + t];
+      return id >= 0 ? id : null;
+    }
+    return null;
+  }
+  obs.addEventListener("mousemove", e => setHover(obsJob(e)));
+  obs.addEventListener("mouseleave", () => setHover(null));
+
+  // ---- probabilities --------------------------------------------------------
+  function drawProbs() {
+    const s = steps[cur], svg = document.getElementById("probs");
+    const text = document.getElementById("probText");
+    document.getElementById("probTitle").innerHTML = isDeep
+      ? "Action probabilities"
+      : `DeepRM's action probabilities <small>in ${meta.policy.toUpperCase()}'s state, for comparison</small>`;
+    if (!s || !s.probs) { svg.innerHTML = ""; text.textContent = "no checkpoint probabilities recorded"; return; }
+    const W = svg.clientWidth || 400, H = 170, top = 16, base = H - 22;
+    const n = M + 1, bw = W / n;
+    const argmax = s.probs.indexOf(Math.max(...s.probs));
+    let out = `<line x1="0" x2="${W}" y1="${base + 0.5}" y2="${base + 0.5}" stroke="${RULE}"/>`;
+    for (let a = 0; a < n; a++) {
+      const p = s.probs[a], h = p * (base - top);
+      const valid = a === 0 || s.fitting.includes(a);
+      const fill = a === s.action ? INK : (a === 0 ? MUTED : (valid ? KIND.start : RULE));
+      const x = a * bw + bw * 0.18, w = bw * 0.64;
+      out += `<rect x="${x}" y="${base - h}" width="${w}" height="${Math.max(h, 0.5)}" fill="${fill}"/>`;
+      if (p >= 0.005) {
+        out += `<text x="${x + w / 2}" y="${base - h - 4}" text-anchor="middle" font-size="10" ` +
+               `font-family="${C("--mono")}" fill="${MUTED}">${p.toFixed(2).replace(/^0/, "")}</text>`;
+      }
+      const label = a === 0 ? "wait" : String(a);
+      const lc = a === s.action ? INK : (valid ? MUTED : FAINT);
+      out += `<text x="${x + w / 2}" y="${H - 6}" text-anchor="middle" font-size="11" ` +
+             `font-weight="${a === s.action ? 600 : 400}" fill="${lc}">${label}</text>`;
+      if (a === argmax && a !== s.action) {
+        out += `<text x="${x + w / 2}" y="${top - 4}" text-anchor="middle" font-size="10" fill="${MUTED}">top</text>`;
+      }
+    }
+    svg.innerHTML = out;
+    const pa = pAdvance(s), wait = s.probs[0];
+    const ent = -s.probs.reduce((acc, p) => acc + (p > 0 ? p * Math.log(p) : 0), 0);
+    const parts = [`p(start a job) ${fmt(1 - pa)}`, `p(wait) ${fmt(wait)}`,
+                   `p(unusable slot) ${fmt(pa - wait)}`, `entropy ${fmt(ent)}`];
+    if (!isDeep) parts.push(`DeepRM's top choice: ${argmax === 0 ? "wait" : "slot " + argmax}`);
+    text.textContent = parts.join("   ");
+  }
+
+  // ---- slot table -----------------------------------------------------------
+  function drawTable() {
+    const s = steps[cur]; if (!s) return;
+    const head = `<tr><th>slot</th><th>job</th><th class="n">duration</th>` +
+      T.resources.map(r => `<th class="n">${r}</th>`).join("") +
+      `<th class="n">waited</th><th>fits now</th><th class="n">p</th></tr>`;
+    const rows = s.slots.map((j, m) => {
+      const a = m + 1, p = s.probs ? fmt(s.probs[a]) : "–";
+      if (!j) return `<tr class="empty"><td class="n">${a}</td><td>empty</td>` +
+        `<td></td>${T.resources.map(() => "<td></td>").join("")}<td></td><td></td><td class="n">${p}</td></tr>`;
+      const cls = a === s.action ? "chosen" : "";
+      return `<tr class="${cls}" data-job="${j.id}"><td class="n">${a}</td>` +
+        `<td><span class="sw" style="background:${color(j.id)}"></span>${j.id}</td>` +
+        `<td class="n">${j.duration}</td>` + j.demand.map(d => `<td class="n">${d}</td>`).join("") +
+        `<td class="n">${j.waited}</td><td>${s.fitting.includes(a) ? "yes" : "no"}</td>` +
+        `<td class="n">${p}</td></tr>`;
+    }).join("");
+    const pWait = s.probs ? fmt(s.probs[0]) : "–";
+    const tail = `<tr class="${s.action === 0 ? "chosen" : ""}"><td class="n">–</td><td>wait</td>` +
+      `<td></td>${T.resources.map(() => "<td></td>").join("")}<td></td><td></td><td class="n">${pWait}</td></tr>` +
+      `<tr class="empty"><td></td><td colspan="${5 + R}">backlog: ${s.backlog} more job${s.backlog === 1 ? "" : "s"} not visible to the policy</td></tr>`;
+    const table = document.getElementById("slots");
+    table.innerHTML = head + rows + tail;
+    table.querySelectorAll("tr[data-job]").forEach(tr => {
+      tr.addEventListener("mouseenter", () => setHover(Number(tr.dataset.job)));
+      tr.addEventListener("mouseleave", () => setHover(null));
+    });
+  }
+
+  // ---- step text ------------------------------------------------------------
+  function drawText() {
+    const s = steps[cur]; if (!s) return;
+    document.getElementById("stepTitle").innerHTML =
+      `Decision ${cur + 1} <small>t = ${s.time}, what the policy saw and what it did</small>`;
+    document.getElementById("pos").textContent = `${cur + 1} / ${N}   t=${s.time}`;
+    document.getElementById("slider").value = cur;
+    let msg;
+    if (s.started !== null) {
+      msg = `Slot ${s.action}: started job ${s.started}. Time stays at t = ${s.time}.`;
+    } else {
+      const why = s.action === 0 ? "Waited" :
+        (s.slots[s.action - 1] === null ? `Picked empty slot ${s.action}, which counts as waiting`
+                                        : `Picked slot ${s.action}, whose job does not fit, which counts as waiting`);
+      msg = `${why}. Time advanced to t = ${s.advanced_to}, reward ${fmt(s.reward)}.`;
+      if (s.withheld) {
+        const held = s.fitting.map(a => `${a} (job ${s.slots[a - 1].id})`).join(", ");
+        msg += ` <span class="held">Slot${s.fitting.length > 1 ? "s" : ""} ${held} could have started.</span>`;
+      }
+    }
+    document.getElementById("outcome").innerHTML = msg;
+  }
+
+  // ---- hover + navigation ---------------------------------------------------
+  function hoverText() {
+    const j = hover !== null ? jobs.get(hover) : null;
+    const t = j ? `job ${j.id}${j.type ? " (" + j.type + ")" : ""}: arrived ${j.arrival}, ` +
+      `started ${j.start ?? "never"}, finished ${j.finish ?? "–"}, duration ${j.duration}, ` +
+      `${demandText(j.demand)}` + (j.finish !== null ? `, slowdown ${fmt((j.finish - j.arrival) / j.duration)}` : "") : "";
+    document.getElementById("ganttHint").textContent = t || "hover a job for details, click to jump to when it started";
+    document.getElementById("obsHint").textContent = t || "hover a cell to find its job";
+  }
+  function setHover(id) {
+    if (id === hover) return;
+    hover = id; drawGantt(); drawObs(); hoverText();
+  }
+  function go(i) {
+    cur = Math.max(0, Math.min(N - 1, i));
+    drawStrip(); drawGantt(); drawObs(); drawProbs(); drawTable(); drawText();
+    try { history.replaceState(null, "", "#" + (cur + 1)); } catch (e) { /* file:// in some browsers */ }
+  }
+  document.getElementById("prev").onclick = () => go(cur - 1);
+  document.getElementById("next").onclick = () => go(cur + 1);
+  document.getElementById("nextHeld").onclick = () => {
+    for (let i = cur + 1; i < N; i++) if (steps[i].withheld) return go(i);
+  };
+  document.getElementById("slider").addEventListener("input", e => go(Number(e.target.value)));
+  document.addEventListener("keydown", e => {
+    if (e.target.tagName === "INPUT") return;  // the slider handles its own arrows
+    const k = e.shiftKey ? 10 : 1;
+    if (e.key === "ArrowRight") { go(cur + k); e.preventDefault(); }
+    else if (e.key === "ArrowLeft") { go(cur - k); e.preventDefault(); }
+    else if (e.key === "Home") go(0);
+    else if (e.key === "End") go(N - 1);
+  });
+  let resizeTimer;
+  window.addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => go(cur), 80); });
+
+  header();
+  hoverText();
+  const fromHash = parseInt(location.hash.slice(1), 10);
+  if (N === 0) {
+    document.getElementById("outcome").textContent = "This episode has no decisions.";
+  } else {
+    go(Number.isFinite(fromHash) ? fromHash - 1 : 0);
+  }
+})();
+</script>
+</body>
+</html>

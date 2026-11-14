@@ -25,6 +25,7 @@ See the [archive index](../archive/README.md) for the retired and deferred work.
 | `train.py` | REINFORCE with the per-decision baseline, workers, logging, checkpoints |
 | `baselines.py` | `SJF`, `Packer`, `TetrisStar`, `RandomFit` as env policies |
 | `evaluate.py` | Slowdown vs. load, withholding/job-size analysis, training cost, plots |
+| `visualize.py` | One-episode decision trace as an offline HTML page (`policy_viz.html`) |
 
 Each module has its own test file (`tests/test_deeprm_*.py`).
 
@@ -138,6 +139,9 @@ uv run --extra deeprm slurm-deeprm-train --output artifacts/deeprm --resume arti
 
 # Evaluate on held-out jobsets at loads 10%..190%
 uv run --extra deeprm slurm-deeprm-evaluate --checkpoint artifacts/deeprm/best.pt --output artifacts/deeprm/eval
+
+# Step through one episode's decisions in the browser
+uv run --extra deeprm slurm-deeprm-visualize --checkpoint artifacts/deeprm/best.pt --load 0.9 --jobset 0
 ```
 
 Useful training options:
@@ -172,6 +176,19 @@ The withholding analysis reports three things:
 - mean slowdown by footprint tercile.
 
 Heuristics never withhold, by construction.
+
+**Policy visualization** (`visualize.py`) plays one test jobset and writes a
+single HTML file to `artifacts/deeprm/viz/`. It opens offline in a browser and shows:
+- a strip of every decision, colored by outcome (started a job, waited with nothing
+  fitting, or waited although a job fit), with the probability that time advances;
+- a timeline of every job's wait and run;
+- for each decision, the observation the network saw (cluster image, slot images
+  and backlog), its action probabilities and the visible jobs.
+
+`--jobset i` is the same jobset as the i-th test jobset in `slurm-deeprm-evaluate`.
+`--policy sjf` (or `fifo`, `packer`, `tetris`, `random`) runs a heuristic instead
+and shows the checkpoint's probabilities in that heuristic's states, for
+comparison. `--sample` samples DeepRM's actions instead of taking the argmax.
 
 ## Gymnasium interface
 

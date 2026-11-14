@@ -13,6 +13,7 @@ dependencies = []
 slurm-deeprm-generate = "slurm_aware.deeprm.generator:main"
 slurm-deeprm-train = "slurm_aware.deeprm.train:main"
 slurm-deeprm-evaluate = "slurm_aware.deeprm.evaluate:main"
+slurm-deeprm-visualize = "slurm_aware.deeprm.visualize:main"
 
 [project.optional-dependencies]
 deeprm = [
